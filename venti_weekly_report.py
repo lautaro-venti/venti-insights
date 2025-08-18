@@ -24,6 +24,13 @@ import pandas as pd
 import subprocess
 import shutil
 
+EMOJI_RX = re.compile(r"[\U00010000-\U0010FFFF]", flags=re.UNICODE)
+def strip_emojis(s: str) -> str:
+    try:
+        return EMOJI_RX.sub("", s or "")
+    except Exception:
+        return s or ""
+
 # Matplotlib headless
 import matplotlib
 matplotlib.use("Agg")
