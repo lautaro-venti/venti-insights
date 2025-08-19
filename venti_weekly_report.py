@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
+Parcheado: logs de Gemini, smoke test, normalización de acentos, KPIs opcionales,
+regex robustas y sanitización de links.
 """
 
 import os
@@ -13,6 +15,7 @@ from datetime import date
 import requests
 import pandas as pd
 import numpy as np
+import unicodedata
 
 # Matplotlib headless
 import matplotlib
@@ -28,6 +31,14 @@ def strip_emojis(s: str) -> str:
         return EMOJI_RX.sub("", s or "")
     except Exception:
         return s or ""
+
+def _norm_txt(s: str) -> str:
+    """Lower + quita tildes/diacríticos + trim."""
+    if s is None:
+        return ""
+    s = str(s).strip().lower()
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return s
 
 def load_csv_robusto(csv_path: str) -> pd.DataFrame:
     encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1", "utf-16", "utf-16-le", "utf-16-be"]
@@ -96,6 +107,8 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[canon] = ""
     return df
 
+# ===================== Taxonomías =====================
+
 VALID_TEMAS = {
     "eventos - user ticket","eventos - user productora","lead comercial","anuncios & notificaciones",
     "duplicado","desvío a intercom","sin respuesta",
@@ -113,20 +126,20 @@ VALID_MOTIVOS = {
 VALID_SUBMOTIVOS = set()
 
 def map_to_catalog(value, catalog):
-    try:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return "", False
-        v = str(value).strip().lower()
-    except Exception:
-        v = ""
+    v = _norm_txt(value)
     if not v or v in ("nan","none"):
         return "", False
-    if v in catalog:
-        return v, True
-    for item in catalog:
-        if v in item or item in v:
-            return item, True
-    return v, False
+    # catálogo normalizado → original
+    norm_catalog = {_norm_txt(x): x for x in catalog}
+    if v in norm_catalog:
+        return norm_catalog[v], True
+    # contains-match tolerante
+    for raw in catalog:
+        nraw = _norm_txt(raw)
+        if v in nraw or nraw in v:
+            return raw, True
+    # devolver como vino si no matchea
+    return value if isinstance(value, str) else str(value), False
 
 def enforce_taxonomy(df: pd.DataFrame) -> pd.DataFrame:
     df["tema_norm"], df["tema_ok"] = zip(*df["tema"].map(lambda x: map_to_catalog(x, VALID_TEMAS)))
@@ -142,27 +155,30 @@ def enforce_taxonomy(df: pd.DataFrame) -> pd.DataFrame:
 def build_text_base(row: pd.Series) -> str:
     parts = []
     for col in ["resumen_ia","insight_ia","palabras_clave","tema_norm","motivo_norm","submotivo_norm","area"]:
-        val = str(row.get(col,"") or "").strip()
-        if val and val.lower() != "nan":
+        val = _norm_txt(row.get(col,""))
+        if val and val != "nan":
             parts.append(val)
-    return " | ".join(parts).lower()
+    return " | ".join(parts)
+
+# ===================== Heurísticas de Issues =====================
 
 RULES = [
-    ("Entrega de entradas", r"(no\s*recib[ií]|reenv(i|í)a|link\s*de\s*entrada|entrada(s)?\s*(no)?\s*llega|ticket\s*no\s|no\s*me\s*lleg[oó])"),
+    ("Entrega de entradas", r"(no\s*recibi|reenvio|link\s*de\s*entrada|entrada(s)?\s*(no)?\s*llega|ticket\s*no\s|no\s*me\s*llego)"),
     ("Transferencia / titularidad", r"(transferenc|transferir|cambio\s*de\s*titular|modificar\s*(nombre|titular)|pasar\s*entrada)"),
-    ("QR / Validación en acceso", r"(qr|validaci[oó]n|control\s*de\s*acceso|escaneo|lector|validador)"),
-    ("Pagos / cobros", r"(pago|pagos|cobro|cobrar|rechazad|tarjeta|mercadopago|mp|cuotas)"),
-    ("Reembolso / devolución", r"(reembolso|devoluci[oó]n|refund|chargeback)"),
-    ("Cuenta / login / registro", r"(cuenta|logue|login|registr|contrasen(?:a|ñ)|clave|verificaci[oó]n\s*de\s*mail|correo\s*inv[aá]lido)"),
-    ("App / rendimiento / bug", r"(app|aplicaci[oó]n|crash|se\s*cierra|no\s*funciona|bug|error\s*(tecnico|500|404))"),
-    ("Soporte / sin respuesta / SDU", r"(sin\s*respuesta|derivaci[oó]n\s*al\s*sdu|sdu|jotform|demora|espera)"),
-    ("Información de evento", r"(consulta\s*por\s*evento|horario|ubicaci[oó]n|vip|mapa|line\s*up|capacidad|ingreso|puerta)"),
-    ("Productores / RRPP / invitaciones", r"(invitaci[oó]n|rrpp|productor|productora|acceso\s*productor|carga\s*de\s*evento|validadores|operativo)"),
+    ("QR / Validación en acceso", r"(qr|validacion|control\s*de\s*acceso|escaneo|lector|validador)"),
+    ("Pagos / cobros", r"(pago|pagos|cobro|cobrar|rechazad|tarjeta|mercadopago|\bmp\b|cuotas)"),
+    ("Reembolso / devolución", r"(reembolso|devolucion|refund|chargeback)"),
+    ("Cuenta / login / registro", r"(cuenta|logue|login|registr|contrasena|clave|verificacion\s*de\s*mail|correo\s*invalido)"),
+    ("App / rendimiento / bug", r"(app|aplicacion|crash|se\s*cierra|no\s*funciona|bug|error\s*(tecnico|500|404))"),
+    ("Soporte / sin respuesta / SDU", r"(sin\s*respuesta|derivacion\s*al\s*sdu|\bsdu\b|jotform|demora|espera)"),
+    ("Información de evento", r"(consulta\s*por\s*evento|horario|ubicacion|vip|mapa|line\s*up|capacidad|ingreso|puerta)"),
+    ("Productores / RRPP / invitaciones", r"(invitacion|\brrpp\b|productor|productora|acceso\s*productor|carga\s*de\s*evento|validadores|operativo)"),
 ]
 
 def assign_issue_group(text: str) -> str:
+    t = _norm_txt(text)
     for label, pattern in RULES:
-        if re.search(pattern, text):
+        if re.search(pattern, t):
             return label
     return "Otros"
 
@@ -185,7 +201,7 @@ def compute_flags(row: pd.Series) -> pd.Series:
     urg = _safe_lower(row.get("urgencia",""))
     canal = _safe_lower(row.get("canal",""))
     risk = "LOW"
-    if any(k in txt for k in ["estafa","fraude","no puedo entrar","no puedo ingresar","rechazad"]):
+    if any(k in _norm_txt(txt) for k in ["estafa","fraude","no puedo entrar","no puedo ingresar","rechazad"]):
         risk = "HIGH"
     elif urg in ("alta","high"):
         risk = "HIGH"
@@ -311,13 +327,16 @@ def compare_with_prev(issues_df: pd.DataFrame, hist_dir="./hist") -> pd.DataFram
 
 # ===================== Gemini (API REST) =====================
 
-def gemini_generate_text(prompt: str,
-                         api_key: str | None = None,
-                         model: str = "gemini-1.5-flash",
-                         temperature: float = 0.3,
-                         max_output_tokens: int = 256) -> str:
-    api_key = api_key or os.getenv("AIzaSyBVCbzd3mAIu9k1O4TU5x9ij9nOnMSaUlE") or os.getenv("AIzaSyBVCbzd3mAIu9k1O4TU5x9ij9nOnMSaUlE")
+def gemini_generate_text(
+    prompt: str,
+    api_key: str | None = None,
+    model: str = "gemini-1.5-flash",
+    temperature: float = 0.3,
+    max_output_tokens: int = 256
+) -> str:
+    api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
+        print("⚠️ GEMINI_API_KEY/GOOGLE_API_KEY no seteado. Saltando generación de insight.")
         return ""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -328,14 +347,30 @@ def gemini_generate_text(prompt: str,
     try:
         r = requests.post(url, headers=headers, data=json.dumps(data), timeout=40)
         if not r.ok:
+            print(f"❌ Gemini HTTP {r.status_code}. Body: {r.text[:500]}")
             return ""
         out = r.json()
         cand = (out.get("candidates") or [{}])[0]
         parts = ((cand.get("content") or {}).get("parts") or [{}])
         text = parts[0].get("text", "").strip()
         return text
-    except Exception:
+    except requests.Timeout:
+        print("⏱️ Timeout llamando a Gemini.")
         return ""
+    except Exception as e:
+        print(f"❌ Excepción llamando a Gemini: {e}")
+        return ""
+
+def _gemini_smoke_test(api_key: str | None, model: str) -> None:
+    """Test corto para evidenciar si Gemini responde antes de generar todo."""
+    if not (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
+        print("ℹ️ Gemini no configurado (sin API key). Insights deshabilitados.")
+        return
+    txt = gemini_generate_text("Ping: responde 'OK' si recibiste este mensaje.", api_key=api_key, model=model, max_output_tokens=8)
+    if txt:
+        print(f"✅ Gemini listo. Respuesta: {txt[:50]}")
+    else:
+        print("⚠️ Gemini no respondió. Verifica key, cuotas o permisos.")
 
 def ai_insight_for_chart(chart_name: str, stats_obj, api_key: str | None = None, model: str = "gemini-1.5-flash") -> str:
     if isinstance(stats_obj, pd.DataFrame):
@@ -467,9 +502,7 @@ def _clean_url(u: str) -> str | None:
     u = u.strip().replace("\n", " ").replace("\r", " ")
     if not u:
         return None
-    # primer token, sin envoltorios
     u = u.split()[0].strip('\'"()[]')
-    # quitar caracteres de control / pipes
     u = ''.join(ch for ch in u if 31 < ord(ch) < 127 and ch not in {'|'})
     if not (u.lower().startswith("http://") or u.lower().startswith("https://")):
         return None
@@ -533,7 +566,6 @@ def build_issues_table_block(resumen_df: pd.DataFrame) -> dict:
                 urls.append(u); seen.add(u)
             if len(urls) >= 3:
                 break
-        # Rich text de ejemplos
         if urls:
             examples_rt = []
             for i, u in enumerate(urls, start=1):
@@ -641,7 +673,6 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
             if img.get("type") == "external" and "external" in img and "url" in img["external"]:
                 safe = _clean_url(img["external"]["url"])
                 if not safe:
-                    # invalid image URL → convertimos a párrafo plano con el caption (evita 400)
                     caption = ""
                     cap_rt = img.get("caption") or []
                     if cap_rt and cap_rt[0].get("type") == "text":
@@ -650,7 +681,6 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
                     b.update(_para(caption or ""))
                 else:
                     img["external"]["url"] = safe
-            # también saneamos el caption
             cap = img.get("caption", [])
             if cap:
                 b["image"]["caption"] = strip_or_fix_rt(cap)
@@ -658,6 +688,13 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
     return blks
 
 # ===================== Página Notion =====================
+
+def _kpi_val(df, col):
+    if col in df.columns and len(df):
+        v = str(df[col].iloc[0]).strip()
+        if v and v.lower() not in ("nan","none","null",""):
+            return df[col].iloc[0]
+    return None
 
 def notion_create_page(parent_page_id: str,
                        token: str,
@@ -678,23 +715,32 @@ def notion_create_page(parent_page_id: str,
     blocks.append(_para(f"💬 Conversaciones procesadas: {meta.get('total','')}"))
     blocks.append(_para("Durante el periodo analizado se registraron conversaciones en Intercom, procesadas por IA para identificar patrones, problemas recurrentes y oportunidades de mejora."))
 
-    # KPIs a la vista
+    # KPIs a la vista (solo si hay valor)
     blocks.append(_h2("KPIs a la vista"))
-    kpis = {
-        "Tickets resueltos": df["tickets_resueltos"].iloc[0] if "tickets_resueltos" in df.columns and len(df) else "—",
-        "% 1ra respuesta": df["tasa_1ra_respuesta"].iloc[0] if "tasa_1ra_respuesta" in df.columns and len(df) else "—",
-        "Tiempo medio de resolución": df["ttr_horas"].iloc[0] if "ttr_horas" in df.columns and len(df) else "—",
-        "Satisfacción (CSAT)": df["csat"].iloc[0] if "csat" in df.columns and len(df) else "—",
-    }
-    for k, v in kpis.items():
-        blocks.append(_bullet(f"{k}: {v}"))
+    kpi_items = [
+        ("Tickets resueltos", _kpi_val(df, "tickets_resueltos")),
+        ("% 1ra respuesta", _kpi_val(df, "tasa_1ra_respuesta")),
+        ("Tiempo medio de resolución", _kpi_val(df, "ttr_horas")),
+        ("Satisfacción (CSAT)", _kpi_val(df, "csat")),
+    ]
+    any_kpi = False
+    for k, v in kpi_items:
+        if v is not None:
+            any_kpi = True
+            blocks.append(_bullet(f"{k}: {v}"))
+    if not any_kpi:
+        blocks.append(_para("—"))
 
     # Top 3 issues
-    top3 = df["issue_group"].value_counts().head(3)
     blocks.append(_h2("Top 3 issues"))
-    for issue, casos in top3.items():
-        pct = f"{(casos/len(df)*100):.0f}%"
-        blocks.append(_bullet(f"{issue} → {casos} casos ({pct})"))
+    total_len = max(len(df), 1)
+    top3 = df["issue_group"].value_counts().head(3)
+    if len(top3) == 0:
+        blocks.append(_para("—"))
+    else:
+        for issue, casos in top3.items():
+            pct = f"{(casos/total_len*100):.0f}%"
+            blocks.append(_bullet(f"{issue} → {casos} casos ({pct})"))
     if insights.get("top_issues"):
         blocks.append(_callout(insights["top_issues"], icon="💡"))
 
@@ -769,7 +815,6 @@ def notion_create_page(parent_page_id: str,
                                 if tkn.get("type") == "text" and tkn.get("text", {}).get("link"):
                                     tkn["text"]["link"] = None
                 elif t == "image":
-                    # dejamos imágenes (ya sanitizadas). Quitamos links en caption si hubiese.
                     cap = b.get("image", {}).get("caption", [])
                     for tkn in cap:
                         if tkn.get("type") == "text" and tkn.get("text", {}).get("link"):
@@ -806,6 +851,9 @@ def run(csv_path: str,
         gemini_model: str = "gemini-1.5-flash"):
 
     os.makedirs(out_dir, exist_ok=True)
+
+    # Smoke test de Gemini temprano para evidenciar problemas de key/cuotas
+    _gemini_smoke_test(gemini_api_key, gemini_model)
 
     # Lectura + normalización + taxonomías
     df = load_csv_robusto(csv_path)
@@ -899,7 +947,7 @@ def run(csv_path: str,
 
     # Gemini: insights y acciones
     insights = {}
-    if gemini_api_key:
+    if gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
         for name, obj in [
             ("top_issues", top_counts.to_dict()),
             ("urgencia_pie", urg_counts.to_dict()),
@@ -911,9 +959,11 @@ def run(csv_path: str,
             txt = ai_insight_for_chart(name, obj, api_key=gemini_api_key, model=gemini_model)
             if txt:
                 insights[name] = txt
+    else:
+        print("ℹ️ Insights por Gemini deshabilitados (sin API key).")
 
     acciones_ai = {}
-    if gemini_api_key:
+    if gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
         for _, row in resumen_df.head(5).iterrows():
             issue = str(row.get("issue",""))
             ctx = {
