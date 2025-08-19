@@ -1,26 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
-
-- Lector CSV robusto + normalización + taxonomías
-- Heurística issue_group
-- CSVs + gráficos (Top Issues, Urgencias/Sentimientos pie, Urgencia por Issue apilado,
-  Canal por Issue apilado, Urgencias en Top Issues agrupadas)
-- Publicar PNGs a GitHub (opcional) para usar URL pública en Notion
-- Notion narrativo: H1/H2/H3, callouts, checklists en 3 columnas, tabla nativa con hipervínculos
-- Gemini API: insights por gráfico + acciones por issue (Producto/Tech/CX)
-
-Uso típico:
-  python venti_weekly_report.py \
-    --csv "A:\\Venti CX\\Venti IA Feedback\\Feedback IA.csv" \
-    --out "A:\\Venti CX\\salida" \
-    --notion_token "ntn_..." \
-    --notion_parent "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" \
-    --publish_github \
-    --github_repo_path "A:\\Venti CX\\venti-insights" \
-    --github_branch "main" \
-    --gemini_api_key "AIza..." \
-    --gemini_model "gemini-1.5-flash"
 """
 
 import os
@@ -49,7 +29,6 @@ def strip_emojis(s: str) -> str:
     except Exception:
         return s or ""
 
-
 def load_csv_robusto(csv_path: str) -> pd.DataFrame:
     encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1", "utf-16", "utf-16-le", "utf-16-be"]
     seps = [",", ";", "\t", None]
@@ -72,7 +51,6 @@ def load_csv_robusto(csv_path: str) -> pd.DataFrame:
         pass
     raise RuntimeError(f"No pude leer el CSV. Último error: {last_err}")
 
-
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     new_cols = []
@@ -80,7 +58,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         cc = str(c).strip().lower()
         cc = cc.replace(" ", "_").replace("__", "_")
         cc = (cc.replace("í", "i").replace("á", "a").replace("é", "e")
-                .replace("ó", "o").replace("ú", "u").replace("ñ", "n"))
+              .replace("ó", "o").replace("ú", "u").replace("ñ", "n"))
         new_cols.append(cc)
     df.columns = new_cols
 
@@ -100,7 +78,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "id_intercom": ["id_intercom","id","conversation_id"],
         "fecha": ["fecha","date","created_at"],
         "rol": ["rol","role"],
-        "issue": ["issue","issue_group"]
     }
     present = set(df.columns)
     for canon, options in aliases.items():
@@ -119,17 +96,11 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[canon] = ""
     return df
 
-
-VALID_TEMAS = set([
-    "eventos - user ticket",
-    "eventos - user productora",
-    "lead comercial",
-    "anuncios & notificaciones",
-    "duplicado",
-    "desvío a intercom",
-    "sin respuesta",
-])
-VALID_MOTIVOS = set([
+VALID_TEMAS = {
+    "eventos - user ticket","eventos - user productora","lead comercial","anuncios & notificaciones",
+    "duplicado","desvío a intercom","sin respuesta",
+}
+VALID_MOTIVOS = {
     "caso excepcional","reenvío","estafa por reventa","compra externa a venti","consulta por evento",
     "team leads & públicas","devolución","pagos","seguridad","evento reprogramado","evento cancelado",
     "contacto comercial","anuncios & notificaciones","duplicado","desvío a intercom","no recibí mi entrada",
@@ -138,9 +109,8 @@ VALID_MOTIVOS = set([
     "liquidaciones","estado de cuenta","datos de cuenta","altas en venti","app de validación","validadores",
     "organización de accesos en el evento","facturación","sin respuesta","reclamo de usuario",
     "consulta sobre uso de la plataforma","desvinculación de personal",
-])
-VALID_SUBMOTIVOS = set([])
-
+}
+VALID_SUBMOTIVOS = set()
 
 def map_to_catalog(value, catalog):
     try:
@@ -158,7 +128,6 @@ def map_to_catalog(value, catalog):
             return item, True
     return v, False
 
-
 def enforce_taxonomy(df: pd.DataFrame) -> pd.DataFrame:
     df["tema_norm"], df["tema_ok"] = zip(*df["tema"].map(lambda x: map_to_catalog(x, VALID_TEMAS)))
     df["motivo_norm"], df["motivo_ok"] = zip(*df["motivo"].map(lambda x: map_to_catalog(x, VALID_MOTIVOS)))
@@ -170,7 +139,6 @@ def enforce_taxonomy(df: pd.DataFrame) -> pd.DataFrame:
         df["taxonomy_flag"] = ~(df["tema_ok"] & df["motivo_ok"])
     return df
 
-
 def build_text_base(row: pd.Series) -> str:
     parts = []
     for col in ["resumen_ia","insight_ia","palabras_clave","tema_norm","motivo_norm","submotivo_norm","area"]:
@@ -178,7 +146,6 @@ def build_text_base(row: pd.Series) -> str:
         if val and val.lower() != "nan":
             parts.append(val)
     return " | ".join(parts).lower()
-
 
 RULES = [
     ("Entrega de entradas", r"(no\s*recib[ií]|reenv(i|í)a|link\s*de\s*entrada|entrada(s)?\s*(no)?\s*llega|ticket\s*no\s|no\s*me\s*lleg[oó])"),
@@ -193,19 +160,16 @@ RULES = [
     ("Productores / RRPP / invitaciones", r"(invitaci[oó]n|rrpp|productor|productora|acceso\s*productor|carga\s*de\s*evento|validadores|operativo)"),
 ]
 
-
 def assign_issue_group(text: str) -> str:
     for label, pattern in RULES:
         if re.search(pattern, text):
             return label
     return "Otros"
 
-
 def top_values(series: pd.Series, n=3) -> str:
     vc = series.fillna("").replace("nan","").astype(str).str.strip().value_counts()
     items = [f"{idx} ({cnt})" for idx, cnt in vc.head(n).items() if idx]
     return ", ".join(items)
-
 
 def _safe_lower(x):
     try:
@@ -214,7 +178,6 @@ def _safe_lower(x):
         return str(x).strip().lower()
     except Exception:
         return ""
-
 
 def compute_flags(row: pd.Series) -> pd.Series:
     txt = " ".join(str(row.get(c,"") or "") for c in
@@ -230,7 +193,6 @@ def compute_flags(row: pd.Series) -> pd.Series:
         risk = "MEDIUM"
     sla_now = (canal in ("whatsapp","instagram")) and (risk == "HIGH")
     return pd.Series({"risk": risk, "sla_now": sla_now})
-
 
 # ===================== Gráficos =====================
 
@@ -248,7 +210,6 @@ def chart_top_issues(df, out_dir):
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, counts
 
-
 def chart_urgencia_pie(df, out_dir):
     counts = df["urgencia"].fillna("Sin dato").replace({"nan":"Sin dato"}).value_counts()
     labels = list(counts.index); vals = list(counts.values)
@@ -261,7 +222,6 @@ def chart_urgencia_pie(df, out_dir):
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, counts
 
-
 def chart_sentimiento_pie(df, out_dir):
     counts = df["sentimiento"].fillna("Sin dato").replace({"nan":"Sin dato"}).value_counts()
     labels = list(counts.index); vals = list(counts.values)
@@ -273,7 +233,6 @@ def chart_sentimiento_pie(df, out_dir):
     p = os.path.join(out_dir, "sentimiento_pie.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, counts
-
 
 def chart_urgencia_por_issue(df, out_dir):
     ct = pd.crosstab(df["issue_group"], df["urgencia"]).fillna(0).astype(int)
@@ -290,7 +249,6 @@ def chart_urgencia_por_issue(df, out_dir):
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, ct
 
-
 def chart_canal_por_issue(df, out_dir):
     ct = pd.crosstab(df["issue_group"], df["canal"]).fillna(0).astype(int)
     fig, ax = plt.subplots(figsize=(9,6))
@@ -305,7 +263,6 @@ def chart_canal_por_issue(df, out_dir):
     p = os.path.join(out_dir, "canal_por_issue.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, ct
-
 
 def chart_urgencias_en_top_issues(df, out_dir, top_n=5):
     top = df["issue_group"].value_counts().head(top_n).index.tolist()
@@ -325,7 +282,6 @@ def chart_urgencias_en_top_issues(df, out_dir, top_n=5):
     p = os.path.join(out_dir, "urgencia_top_issues.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, ct
-
 
 # ===================== Comparativa WoW =====================
 
@@ -352,7 +308,6 @@ def compare_with_prev(issues_df: pd.DataFrame, hist_dir="./hist") -> pd.DataFram
 
     issues_df["wow_change_pct"], issues_df["anomaly_flag"] = zip(*issues_df.apply(lambda r: calc(r["issue"], r["casos"]), axis=1))
     return issues_df
-
 
 # ===================== Gemini (API REST) =====================
 
@@ -382,7 +337,6 @@ def gemini_generate_text(prompt: str,
     except Exception:
         return ""
 
-
 def ai_insight_for_chart(chart_name: str, stats_obj, api_key: str | None = None, model: str = "gemini-1.5-flash") -> str:
     if isinstance(stats_obj, pd.DataFrame):
         snap = stats_obj.head(10).to_string()
@@ -399,7 +353,6 @@ def ai_insight_for_chart(chart_name: str, stats_obj, api_key: str | None = None,
         "Formato: observación concreta + recomendación."
     )
     return gemini_generate_text(prompt, api_key=api_key, model=model, max_output_tokens=200)
-
 
 def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None, model: str = "gemini-1.5-flash") -> dict:
     ctx_json = json.dumps(contexto, ensure_ascii=False)
@@ -421,7 +374,6 @@ def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None,
     except Exception:
         return {}
 
-
 # ===================== Publicación en GitHub (assets) =====================
 
 def _run_git(cmd, cwd):
@@ -429,7 +381,6 @@ def _run_git(cmd, cwd):
     if p.returncode != 0:
         raise RuntimeError(p.stderr or p.stdout)
     return (p.stdout or "").strip()
-
 
 def _parse_remote_origin(remote_url: str):
     u = remote_url.strip()
@@ -445,7 +396,6 @@ def _parse_remote_origin(remote_url: str):
     if len(parts) >= 2:
         return parts[-2], parts[-1]
     raise ValueError(f"URL inesperada: {remote_url}")
-
 
 def publish_images_to_github(out_dir: str,
                              repo_path: str,
@@ -483,8 +433,7 @@ def publish_images_to_github(out_dir: str,
     base_raw = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/reports/{date_subdir}"
     return base_raw
 
-
-# ===================== Notion (bloques nativos) =====================
+# ===================== Notion helpers (bloques + URL sanitizer) =====================
 
 def _h1(text):
     return {"object":"block","type":"heading_1","heading_1":{"rich_text":[{"type":"text","text":{"content":text}}]}}
@@ -507,16 +456,39 @@ def _todo(text, checked=False):
 def _callout(text, icon="💡"):
     return {"object":"block","type":"callout","callout":{"rich_text":[{"type":"text","text":{"content":text}}],"icon":{"type":"emoji","emoji":icon}}}
 
-def _image_external(url, caption=None):
-    b = {"object":"block","type":"image","image":{"type":"external","external":{"url":url}}}
-    if caption:
-        b["image"]["caption"] = [{"type":"text","text":{"content":caption}}]
-    return b
-
 def _rt(text: str):
     return [{"type": "text", "text": {"content": str(text)}}]
 
-# Columnas (Producto | Tech | CX)
+URL_RX = re.compile(r'^https?://[^\s<>"\'\|\)\]]+$', re.IGNORECASE)
+
+def _clean_url(u: str) -> str | None:
+    if not isinstance(u, str):
+        return None
+    u = u.strip().replace("\n", " ").replace("\r", " ")
+    if not u:
+        return None
+    # primer token, sin envoltorios
+    u = u.split()[0].strip('\'"()[]')
+    # quitar caracteres de control / pipes
+    u = ''.join(ch for ch in u if 31 < ord(ch) < 127 and ch not in {'|'})
+    if not (u.lower().startswith("http://") or u.lower().startswith("https://")):
+        return None
+    return u if URL_RX.match(u) else None
+
+def _link(text: str, url: str):
+    safe = _clean_url(url)
+    if not safe:
+        return {"type":"text","text":{"content":str(text)}}
+    return {"type":"text","text":{"content":str(text),"link":{"url":safe}}}
+
+def _image_external_if_valid(url: str | None, caption: str | None = None):
+    safe = _clean_url(url) if url else None
+    if not safe:
+        return None
+    b = {"object":"block","type":"image","image":{"type":"external","external":{"url":safe}}}
+    if caption:
+        b["image"]["caption"] = [{"type":"text","text":{"content":caption}}]
+    return b
 
 def _column_list(columns_children: list[list[dict]]):
     return {
@@ -524,8 +496,6 @@ def _column_list(columns_children: list[list[dict]]):
         "type":"column_list",
         "column_list":{"children":[{"object":"block","type":"column","column":{"children":ch}} for ch in columns_children]}
     }
-
-# Tabla nativa Notion
 
 def _notion_table(headers: list[str], rows: list[list[list[dict]]]):
     table = {
@@ -549,18 +519,30 @@ def _notion_table(headers: list[str], rows: list[list[list[dict]]]):
         })
     return table
 
-
 def build_issues_table_block(resumen_df: pd.DataFrame) -> dict:
     headers = ["Issue","Casos","Canales","Areas","Motivos","Submotivos","Ejemplos"]
     rows = []
     for _, r in resumen_df.sort_values("casos", ascending=False).iterrows():
-        ej_text = str(r.get("ejemplos_intercom","") or "").strip()
-        links = [x.strip() for x in ej_text.split("|") if x.strip()]
-        link_cells = []
-        for i, url in enumerate(links[:3], start=1):
-            link_cells.append([{ "type":"text", "text": {"content": f"Ejemplo {i}", "link": {"url": url}} }])
-        if not link_cells:
-            link_cells = [[{ "type":"text", "text": {"content": "-"}}]]
+        ej_text = str(r.get("ejemplos_intercom","") or "")
+        parts = [p.strip() for p in ej_text.replace("\n"," ").split("|") if p.strip()]
+        urls = []
+        seen = set()
+        for p in parts:
+            u = _clean_url(p)
+            if u and u not in seen:
+                urls.append(u); seen.add(u)
+            if len(urls) >= 3:
+                break
+        # Rich text de ejemplos
+        if urls:
+            examples_rt = []
+            for i, u in enumerate(urls, start=1):
+                examples_rt.append(_link(f"Ejemplo {i}", u))
+                if i < len(urls):
+                    examples_rt.append({"type":"text","text":{"content":"  •  "}})
+        else:
+            examples_rt = [{"type":"text","text":{"content":"—"}}]
+
         row_cells = [
             _rt(r.get("issue","")),
             _rt(str(int(r.get("casos",0) or 0))),
@@ -568,11 +550,10 @@ def build_issues_table_block(resumen_df: pd.DataFrame) -> dict:
             _rt(r.get("areas_top","")),
             _rt(r.get("motivos_top","")),
             _rt(r.get("submotivos_top","")),
-            (sum(link_cells, []) if len(link_cells) > 1 else link_cells[0])
+            examples_rt
         ]
         rows.append(row_cells)
     return _notion_table(headers, rows)
-
 
 ACTION_LIBRARY = {
     "Pagos / cobros": {
@@ -602,14 +583,12 @@ ACTION_LIBRARY = {
     }
 }
 
-
 def actions_for_issue(issue: str):
     return ACTION_LIBRARY.get(issue, {
         "Producto": ["Quick wins de UX para reducir fricción."],
         "Tech": ["Registrar error types + tracing/dashboards."],
         "CX": ["Macro de contención + FAQ específica."]
     })
-
 
 def build_actions_section_blocks(resumen_df: pd.DataFrame, top_n: int = 5, acciones_ai: dict | None = None) -> list[dict]:
     blocks = []
@@ -626,6 +605,57 @@ def build_actions_section_blocks(resumen_df: pd.DataFrame, top_n: int = 5, accio
         blocks.append(_column_list([col_prod, col_tech, col_cx]))
     return blocks
 
+# -------- sanitizador transversal de links en TODOS los bloques --------
+
+def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
+    """
+    Recorre todos los rich_text, celdas de tablas e imágenes y elimina link.href
+    cuando la URL no pasa _clean_url. Devuelve una copia segura.
+    """
+    blks = json.loads(json.dumps(blocks))  # deep copy
+
+    def strip_or_fix_rt(rt_list):
+        for tkn in rt_list:
+            if tkn.get("type") == "text":
+                link = tkn.get("text", {}).get("link")
+                if link and "url" in link:
+                    safe = _clean_url(link["url"])
+                    if not safe:
+                        tkn["text"]["link"] = None
+                    else:
+                        tkn["text"]["link"]["url"] = safe
+        return rt_list
+
+    for b in blks:
+        t = b.get("type")
+        if t in ("paragraph","bulleted_list_item","to_do","heading_1","heading_2","heading_3","callout"):
+            if t in b and "rich_text" in b[t]:
+                b[t]["rich_text"] = strip_or_fix_rt(b[t]["rich_text"])
+        elif t == "table":
+            for row in b.get("table", {}).get("children", []):
+                cells = row.get("table_row", {}).get("cells", [])
+                for i, cell in enumerate(cells):
+                    cells[i] = strip_or_fix_rt(cell)
+        elif t == "image":
+            img = b.get("image", {})
+            if img.get("type") == "external" and "external" in img and "url" in img["external"]:
+                safe = _clean_url(img["external"]["url"])
+                if not safe:
+                    # invalid image URL → convertimos a párrafo plano con el caption (evita 400)
+                    caption = ""
+                    cap_rt = img.get("caption") or []
+                    if cap_rt and cap_rt[0].get("type") == "text":
+                        caption = cap_rt[0]["text"].get("content","")
+                    b.clear()
+                    b.update(_para(caption or ""))
+                else:
+                    img["external"]["url"] = safe
+            # también saneamos el caption
+            cap = img.get("caption", [])
+            if cap:
+                b["image"]["caption"] = strip_or_fix_rt(cap)
+
+    return blks
 
 # ===================== Página Notion =====================
 
@@ -643,12 +673,12 @@ def notion_create_page(parent_page_id: str,
 
     # Resumen Ejecutivo
     blocks.append(_h2("Resumen Ejecutivo"))
-    blocks.append(_para(f"📅 Fecha del análisis: {meta.get('fecha','')}`"))
-    blocks.append(_para(f"📂 Fuente de datos: {meta.get('fuente','')}`"))
-    blocks.append(_para(f"💬 Conversaciones procesadas: {meta.get('total','')}`"))
+    blocks.append(_para(f"📅 Fecha del análisis: {meta.get('fecha','')}"))
+    blocks.append(_para(f"📂 Fuente de datos: {meta.get('fuente','')}"))
+    blocks.append(_para(f"💬 Conversaciones procesadas: {meta.get('total','')}"))
     blocks.append(_para("Durante el periodo analizado se registraron conversaciones en Intercom, procesadas por IA para identificar patrones, problemas recurrentes y oportunidades de mejora."))
 
-    # KPIs a la vista (placeholders)
+    # KPIs a la vista
     blocks.append(_h2("KPIs a la vista"))
     kpis = {
         "Tickets resueltos": df["tickets_resueltos"].iloc[0] if "tickets_resueltos" in df.columns and len(df) else "—",
@@ -668,39 +698,46 @@ def notion_create_page(parent_page_id: str,
     if insights.get("top_issues"):
         blocks.append(_callout(insights["top_issues"], icon="💡"))
 
-    # Gráficos + insights
-    if chart_urls.get("top_issues"):           blocks.append(_image_external(chart_urls["top_issues"], "Top Issues"))
-    if chart_urls.get("urgencia_pie"):         blocks.append(_image_external(chart_urls["urgencia_pie"], "Distribución de Urgencias"))
-    if insights.get("urgencia_pie"):           blocks.append(_callout(insights["urgencia_pie"], icon="💡"))
-    if chart_urls.get("sentimiento_pie"):      blocks.append(_image_external(chart_urls["sentimiento_pie"], "Distribución de Sentimientos"))
-    if insights.get("sentimiento_pie"):        blocks.append(_callout(insights["sentimiento_pie"], icon="💡"))
-    if chart_urls.get("urgencia_por_issue"):   blocks.append(_image_external(chart_urls["urgencia_por_issue"], "Urgencia por Issue"))
-    if insights.get("urgencia_por_issue"):     blocks.append(_callout(insights["urgencia_por_issue"], icon="💡"))
-    if chart_urls.get("urgencia_top_issues"):  blocks.append(_image_external(chart_urls["urgencia_top_issues"], "Urgencias en Top Issues (agrupadas)"))
-    if insights.get("urgencia_top_issues"):    blocks.append(_callout(insights["urgencia_top_issues"], icon="💡"))
-    if chart_urls.get("canal_por_issue"):      blocks.append(_image_external(chart_urls["canal_por_issue"], "Canal por Issue"))
-    if insights.get("canal_por_issue"):        blocks.append(_callout(insights["canal_por_issue"], icon="💡"))
+    # Gráficos + insights (URLs válidas únicamente)
+    blk = _image_external_if_valid(chart_urls.get("top_issues"), "Top Issues")
+    if blk: blocks.append(blk)
+    blk = _image_external_if_valid(chart_urls.get("urgencia_pie"), "Distribución de Urgencias")
+    if blk: blocks.append(blk)
+    if insights.get("urgencia_pie"): blocks.append(_callout(insights["urgencia_pie"], icon="💡"))
+    blk = _image_external_if_valid(chart_urls.get("sentimiento_pie"), "Distribución de Sentimientos")
+    if blk: blocks.append(blk)
+    if insights.get("sentimiento_pie"): blocks.append(_callout(insights["sentimiento_pie"], icon="💡"))
+    blk = _image_external_if_valid(chart_urls.get("urgencia_por_issue"), "Urgencia por Issue")
+    if blk: blocks.append(blk)
+    if insights.get("urgencia_por_issue"): blocks.append(_callout(insights["urgencia_por_issue"], icon="💡"))
+    blk = _image_external_if_valid(chart_urls.get("urgencia_top_issues"), "Urgencias en Top Issues (agrupadas)")
+    if blk: blocks.append(blk)
+    if insights.get("urgencia_top_issues"): blocks.append(_callout(insights["urgencia_top_issues"], icon="💡"))
+    blk = _image_external_if_valid(chart_urls.get("canal_por_issue"), "Canal por Issue")
+    if blk: blocks.append(blk)
+    if insights.get("canal_por_issue"): blocks.append(_callout(insights["canal_por_issue"], icon="💡"))
 
-    # Análisis de Categorizaciones Manuales
+    # Categorizaciones Manuales
     blocks.append(_h2("Análisis de Categorizaciones Manuales"))
-    temas = df["tema_norm"].value_counts().head(5).items()
-    motivos = df["motivo_norm"].value_counts().head(5).items()
-    blocks.append(_h3("Temas"))
-    for k, v in temas: blocks.append(_bullet(f"{k} → {v} casos"))
-    blocks.append(_h3("Motivos"))
-    for k, v in motivos: blocks.append(_bullet(f"{k} → {v} casos"))
+    for k, v in df["tema_norm"].value_counts().head(5).items():
+        blocks.append(_bullet(f"Tema • {k}: {v}"))
+    for k, v in df["motivo_norm"].value_counts().head(5).items():
+        blocks.append(_bullet(f"Motivo • {k}: {v}"))
 
-    # Issues Detallados (tabla nativa con hipervínculos)
+    # Issues Detallados (tabla nativa con hipervínculos saneados)
     blocks.append(_h2("Issues Detallados"))
     blocks.append(build_issues_table_block(resumen_df))
 
-    # Acciones A Evaluar (3 columnas + IA)
+    # Acciones A Evaluar
     blocks.extend(build_actions_section_blocks(resumen_df, top_n=5, acciones_ai=acciones_ai))
+
+    # --------- SANITIZACIÓN PREVIA A NOTION ---------
+    safe_children = _sanitize_links_in_blocks(blocks)
 
     payload = {
         "parent": {"type": "page_id", "page_id": parent_page_id},
         "properties": {"title": {"title": [{"text": {"content": page_title}}]}},
-        "children": blocks
+        "children": safe_children
     }
 
     resp = requests.post(
@@ -712,10 +749,48 @@ def notion_create_page(parent_page_id: str,
         },
         data=json.dumps(payload)
     )
+
+    # Retry sin NINGÚN link si Notion rechaza por URL
+    if not resp.ok and ("Invalid URL" in (resp.text or "") or "link" in (resp.text or "").lower()):
+        def strip_all_links(blks: list[dict]) -> list[dict]:
+            blks = json.loads(json.dumps(blks))
+            for b in blks:
+                t = b.get("type")
+                if t in ("paragraph","bulleted_list_item","to_do","heading_1","heading_2","heading_3","callout"):
+                    rt = b.get(t, {}).get("rich_text", [])
+                    for tkn in rt:
+                        if tkn.get("type") == "text" and tkn.get("text", {}).get("link"):
+                            tkn["text"]["link"] = None
+                elif t == "table":
+                    for row in b.get("table", {}).get("children", []):
+                        cells = row.get("table_row", {}).get("cells", [])
+                        for cell in cells:
+                            for tkn in cell:
+                                if tkn.get("type") == "text" and tkn.get("text", {}).get("link"):
+                                    tkn["text"]["link"] = None
+                elif t == "image":
+                    # dejamos imágenes (ya sanitizadas). Quitamos links en caption si hubiese.
+                    cap = b.get("image", {}).get("caption", [])
+                    for tkn in cap:
+                        if tkn.get("type") == "text" and tkn.get("text", {}).get("link"):
+                            tkn["text"]["link"] = None
+            return blks
+
+        payload_retry = dict(payload)
+        payload_retry["children"] = strip_all_links(payload["children"])
+        resp = requests.post(
+            "https://api.notion.com/v1/pages",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json"
+            },
+            data=json.dumps(payload_retry)
+        )
+
     if not resp.ok:
         raise RuntimeError(f"Notion error {resp.status_code}: {resp.text}")
     return resp.json()
-
 
 # ===================== Core =====================
 
@@ -752,10 +827,10 @@ def run(csv_path: str,
     # Resumen por issue
     rows = []
     for issue, grp in df.groupby("issue_group"):
-        canales = top_values(grp["canal"]) 
-        areas = top_values(grp["area"]) 
+        canales = top_values(grp["canal"])
+        areas = top_values(grp["area"])
         motivos = top_values(grp["motivo_norm"])
-        submotivos = top_values(grp["submotivo_norm"]) 
+        submotivos = top_values(grp["submotivo_norm"])
         ejemplos = grp.loc[grp["link_a_intercom"].astype(str).str.len() > 0, "link_a_intercom"].head(3).astype(str).tolist()
         rows.append({
             "issue": issue,
@@ -885,7 +960,6 @@ def run(csv_path: str,
             "insights": insights
         }, indent=2, ensure_ascii=False))
 
-
 # ===================== CLI =====================
 
 def main():
@@ -920,7 +994,6 @@ def main():
         gemini_api_key=args.gemini_api_key,
         gemini_model=args.gemini_model
     )
-
 
 if __name__ == "__main__":
     main()
