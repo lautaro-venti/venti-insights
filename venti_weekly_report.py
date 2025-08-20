@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
-Parcheado: logs de Gemini, smoke test, normalización de acentos, KPIs opcionales,
-regex robustas y sanitización de links.
+Incluye: KPIs desde datos crudos, KPIs al inicio, smoke test Gemini, normalización y sanitizado.
 """
 
 import os
@@ -68,8 +67,8 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in df.columns:
         cc = str(c).strip().lower()
         cc = cc.replace(" ", "_").replace("__", "_")
-        cc = (cc.replace("í", "i").replace("á", "a").replace("é", "e")
-              .replace("ó", "o").replace("ú", "u").replace("ñ", "n"))
+        cc = cc.replace("í", "i").replace("á", "a") if False else cc
+        cc = (cc.replace("é","e").replace("ó","o").replace("ú","u").replace("ñ","n"))
         new_cols.append(cc)
     df.columns = new_cols
 
@@ -89,6 +88,15 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "id_intercom": ["id_intercom","id","conversation_id"],
         "fecha": ["fecha","date","created_at"],
         "rol": ["rol","role"],
+        # KPI crudos / timing
+        "created_at": ["created_at","created","createdat"],
+        "first_admin_reply_at": ["first_admin_reply_at","firstadminreplyat","first_admin_reply","first_response_at"],
+        "first_contact_reply_at": ["first_contact_reply_at","firstcontactreplyat"],
+        "closed_at": ["closed_at","closed","first_close_at","statistics_first_close_at","statistics_last_close_at"],
+        "ttr_seconds": ["ttr_seconds","time_to_first_close","statistics_time_to_first_close"],
+        "first_response_seconds": ["first_response_seconds","first_response_time","first_reply_seconds"],
+        "status": ["status","state"],
+        "csat": ["csat","rating","conversation_rating","rating_value"],
     }
     present = set(df.columns)
     for canon, options in aliases.items():
@@ -100,9 +108,10 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
                 present.add(canon)
                 break
 
-    for canon in ["resumen_ia","insight_ia","palabras_clave","canal","area","tema",
-                  "motivo","submotivo","urgencia","sentimiento","categoria",
-                  "link_a_intercom","id_intercom","fecha","rol"]:
+    base_cols = ["resumen_ia","insight_ia","palabras_clave","canal","area","tema",
+                 "motivo","submotivo","urgencia","sentimiento","categoria",
+                 "link_a_intercom","id_intercom","fecha","rol"]
+    for canon in base_cols:
         if canon not in df.columns:
             df[canon] = ""
     return df
@@ -129,16 +138,13 @@ def map_to_catalog(value, catalog):
     v = _norm_txt(value)
     if not v or v in ("nan","none"):
         return "", False
-    # catálogo normalizado → original
     norm_catalog = {_norm_txt(x): x for x in catalog}
     if v in norm_catalog:
         return norm_catalog[v], True
-    # contains-match tolerante
     for raw in catalog:
         nraw = _norm_txt(raw)
         if v in nraw or nraw in v:
             return raw, True
-    # devolver como vino si no matchea
     return value if isinstance(value, str) else str(value), False
 
 def enforce_taxonomy(df: pd.DataFrame) -> pd.DataFrame:
@@ -209,6 +215,62 @@ def compute_flags(row: pd.Series) -> pd.Series:
         risk = "MEDIUM"
     sla_now = (canal in ("whatsapp","instagram")) and (risk == "HIGH")
     return pd.Series({"risk": risk, "sla_now": sla_now})
+
+# ===================== KPI desde campos crudos =====================
+
+def _to_num(df, col):
+    return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series([np.nan]*len(df))
+
+def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
+    """Calcula KPI usando columnas epoch (segundos) y/o segundos ya precalculados."""
+    created  = _to_num(df, "created_at")
+    closed   = _to_num(df, "closed_at")
+    far      = _to_num(df, "first_admin_reply_at")
+    fcr      = _to_num(df, "first_contact_reply_at")
+    frs      = _to_num(df, "first_response_seconds")
+    ttr_secs = _to_num(df, "ttr_seconds")
+
+    # first_response_seconds: si falta, usar (first_admin_reply_at o first_contact_reply_at) - created_at
+    need_frs = frs.isna()
+    base_first = far.where(~far.isna(), fcr)
+    est_frs = base_first - created
+    frs = frs.where(~need_frs, est_frs)
+    frs = frs.where(frs >= 0, np.nan)
+
+    # TTR: si falta, usar closed - created
+    need_ttr = ttr_secs.isna()
+    est_ttr = closed - created
+    ttr_secs = ttr_secs.where(~need_ttr, est_ttr)
+    ttr_secs = ttr_secs.where(ttr_secs >= 0, np.nan)
+
+    # Tickets resueltos
+    if "status" in df.columns:
+        tickets = int((df["status"].astype(str).str.lower() == "closed").sum())
+        if tickets == 0:
+            tickets = int(len(df))
+    else:
+        tickets = int(len(df))
+
+    # % primera respuesta en SLA
+    base = int(frs.notna().sum())
+    tasa_1ra = (float((frs <= sla_minutes*60).sum()) / base * 100.0) if base else None
+
+    # TTR promedio horas
+    ttr_horas = float(ttr_secs.mean())/3600.0 if ttr_secs.notna().any() else None
+
+    # CSAT
+    csat = None
+    if "csat" in df.columns:
+        cs = pd.to_numeric(df["csat"], errors="coerce")
+        if cs.notna().any():
+            csat = round(float(cs.mean()), 2)
+
+    return {
+        "tickets_resueltos": tickets,
+        "tasa_1ra_respuesta": f"{tasa_1ra:.0f}%" if isinstance(tasa_1ra, float) else "—",
+        "ttr_horas": round(ttr_horas, 2) if isinstance(ttr_horas, float) else "—",
+        "csat": csat if csat is not None else "—",
+    }
 
 # ===================== Gráficos =====================
 
@@ -362,7 +424,6 @@ def gemini_generate_text(
         return ""
 
 def _gemini_smoke_test(api_key: str | None, model: str) -> None:
-    """Test corto para evidenciar si Gemini responde antes de generar todo."""
     if not (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
         print("ℹ️ Gemini no configurado (sin API key). Insights deshabilitados.")
         return
@@ -640,10 +701,6 @@ def build_actions_section_blocks(resumen_df: pd.DataFrame, top_n: int = 5, accio
 # -------- sanitizador transversal de links en TODOS los bloques --------
 
 def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
-    """
-    Recorre todos los rich_text, celdas de tablas e imágenes y elimina link.href
-    cuando la URL no pasa _clean_url. Devuelve una copia segura.
-    """
     blks = json.loads(json.dumps(blocks))  # deep copy
 
     def strip_or_fix_rt(rt_list):
@@ -689,13 +746,6 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
 
 # ===================== Página Notion =====================
 
-def _kpi_val(df, col):
-    if col in df.columns and len(df):
-        v = str(df[col].iloc[0]).strip()
-        if v and v.lower() not in ("nan","none","null",""):
-            return df[col].iloc[0]
-    return None
-
 def notion_create_page(parent_page_id: str,
                        token: str,
                        page_title: str,
@@ -704,9 +754,29 @@ def notion_create_page(parent_page_id: str,
                        meta: dict,
                        chart_urls: dict,
                        insights: dict,
-                       acciones_ai: dict | None = None):
+                       acciones_ai: dict | None = None,
+                       kpis: dict | None = None):
     blocks = []
     blocks.append(_h1(page_title))
+
+    # === KPIs a la vista (arriba de todo) ===
+    blocks.append(_h2("KPIs a la vista"))
+    if kpis:
+        ordered = [
+            ("Tickets resueltos", kpis.get("tickets_resueltos")),
+            ("% 1ra respuesta", kpis.get("tasa_1ra_respuesta")),
+            ("Tiempo medio de resolución", kpis.get("ttr_horas")),
+            ("Satisfacción (CSAT)", kpis.get("csat")),
+        ]
+        any_kpi = False
+        for label, val in ordered:
+            if val not in (None, "", "nan", "—"):
+                any_kpi = True
+                blocks.append(_bullet(f"{label}: {val}"))
+        if not any_kpi:
+            blocks.append(_para("—"))
+    else:
+        blocks.append(_para("—"))
 
     # Resumen Ejecutivo
     blocks.append(_h2("Resumen Ejecutivo"))
@@ -714,22 +784,6 @@ def notion_create_page(parent_page_id: str,
     blocks.append(_para(f"📂 Fuente de datos: {meta.get('fuente','')}"))
     blocks.append(_para(f"💬 Conversaciones procesadas: {meta.get('total','')}"))
     blocks.append(_para("Durante el periodo analizado se registraron conversaciones en Intercom, procesadas por IA para identificar patrones, problemas recurrentes y oportunidades de mejora."))
-
-    # KPIs a la vista (solo si hay valor)
-    blocks.append(_h2("KPIs a la vista"))
-    kpi_items = [
-        ("Tickets resueltos", _kpi_val(df, "tickets_resueltos")),
-        ("% 1ra respuesta", _kpi_val(df, "tasa_1ra_respuesta")),
-        ("Tiempo medio de resolución", _kpi_val(df, "ttr_horas")),
-        ("Satisfacción (CSAT)", _kpi_val(df, "csat")),
-    ]
-    any_kpi = False
-    for k, v in kpi_items:
-        if v is not None:
-            any_kpi = True
-            blocks.append(_bullet(f"{k}: {v}"))
-    if not any_kpi:
-        blocks.append(_para("—"))
 
     # Top 3 issues
     blocks.append(_h2("Top 3 issues"))
@@ -744,7 +798,7 @@ def notion_create_page(parent_page_id: str,
     if insights.get("top_issues"):
         blocks.append(_callout(insights["top_issues"], icon="💡"))
 
-    # Gráficos + insights (URLs válidas únicamente)
+    # Gráficos + insights
     blk = _image_external_if_valid(chart_urls.get("top_issues"), "Top Issues")
     if blk: blocks.append(blk)
     blk = _image_external_if_valid(chart_urls.get("urgencia_pie"), "Distribución de Urgencias")
@@ -770,14 +824,14 @@ def notion_create_page(parent_page_id: str,
     for k, v in df["motivo_norm"].value_counts().head(5).items():
         blocks.append(_bullet(f"Motivo • {k}: {v}"))
 
-    # Issues Detallados (tabla nativa con hipervínculos saneados)
+    # Issues Detallados (tabla)
     blocks.append(_h2("Issues Detallados"))
     blocks.append(build_issues_table_block(resumen_df))
 
     # Acciones A Evaluar
     blocks.extend(build_actions_section_blocks(resumen_df, top_n=5, acciones_ai=acciones_ai))
 
-    # --------- SANITIZACIÓN PREVIA A NOTION ---------
+    # Sanitizado
     safe_children = _sanitize_links_in_blocks(blocks)
 
     payload = {
@@ -796,7 +850,6 @@ def notion_create_page(parent_page_id: str,
         data=json.dumps(payload)
     )
 
-    # Retry sin NINGÚN link si Notion rechaza por URL
     if not resp.ok and ("Invalid URL" in (resp.text or "") or "link" in (resp.text or "").lower()):
         def strip_all_links(blks: list[dict]) -> list[dict]:
             blks = json.loads(json.dumps(blks))
@@ -852,7 +905,7 @@ def run(csv_path: str,
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # Smoke test de Gemini temprano para evidenciar problemas de key/cuotas
+    # Smoke test de Gemini
     _gemini_smoke_test(gemini_api_key, gemini_model)
 
     # Lectura + normalización + taxonomías
@@ -862,6 +915,9 @@ def run(csv_path: str,
         if col in df.columns:
             df[col] = df[col].astype(object)
     df = enforce_taxonomy(df)
+
+    # KPI desde crudos
+    kpis = compute_kpis_from_raw_df(df, sla_minutes=15)
 
     # Issue grouping
     df["texto_base"] = df.apply(build_text_base, axis=1)
@@ -898,7 +954,10 @@ def run(csv_path: str,
     df_export_cols = ["fecha","canal","rol","area","tema_norm","motivo_norm","submotivo_norm",
                       "categoria","urgencia","sentimiento","resumen_ia","insight_ia",
                       "palabras_clave","issue_group","risk","sla_now","taxonomy_flag",
-                      "link_a_intercom","id_intercom"]
+                      "link_a_intercom","id_intercom",
+                      # KPI crudos para auditoría
+                      "created_at","first_admin_reply_at","first_contact_reply_at","closed_at",
+                      "first_response_seconds","ttr_seconds","status","csat"]
     existing = [c for c in df_export_cols if c in df.columns]
     df[existing].to_csv(casos_csv, index=False, encoding="utf-8")
     resumen_df.to_csv(issues_csv, index=False, encoding="utf-8")
@@ -959,8 +1018,6 @@ def run(csv_path: str,
             txt = ai_insight_for_chart(name, obj, api_key=gemini_api_key, model=gemini_model)
             if txt:
                 insights[name] = txt
-    else:
-        print("ℹ️ Insights por Gemini deshabilitados (sin API key).")
 
     acciones_ai = {}
     if gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
@@ -982,7 +1039,7 @@ def run(csv_path: str,
     if notion_token and notion_parent:
         page_title = f"Reporte CX – {date.today().isoformat()}"
         meta = {"fecha": date.today().isoformat(), "fuente": os.path.basename(csv_path), "total": total}
-        notion_create_page(
+        page = notion_create_page(
             parent_page_id=notion_parent,
             token=notion_token,
             page_title=page_title,
@@ -991,9 +1048,10 @@ def run(csv_path: str,
             meta=meta,
             chart_urls=chart_urls,
             insights=insights,
-            acciones_ai=acciones_ai if acciones_ai else None
+            acciones_ai=acciones_ai if acciones_ai else None,
+            kpis=kpis
         )
-        print("✅ Publicado en Notion.")
+        print(f"✅ Publicado en Notion: {page.get('url','(sin url)')}")
     else:
         print("ℹ️ Notion no configurado. Se generaron archivos locales.")
         print(json.dumps({
@@ -1007,7 +1065,8 @@ def run(csv_path: str,
                 "canal_por_issue": p_canal_issue,
                 "urgencia_top_issues": p_urg_top
             },
-            "insights": insights
+            "insights": insights,
+            "kpis": kpis
         }, indent=2, ensure_ascii=False))
 
 # ===================== CLI =====================
@@ -1047,6 +1106,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
