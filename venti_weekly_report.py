@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
-Incluye: KPIs desde datos crudos, KPIs al inicio, smoke test Gemini, normalización y sanitizado.
+Incluye: KPIs desde datos crudos, KPIs al inicio, insights de Tema/Motivo,
+sanitizado de links, publicación de imágenes y smoke test de Gemini.
 """
 
 import os
@@ -67,8 +68,9 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in df.columns:
         cc = str(c).strip().lower()
         cc = cc.replace(" ", "_").replace("__", "_")
-        cc = cc.replace("í", "i").replace("á", "a") if False else cc
-        cc = (cc.replace("é","e").replace("ó","o").replace("ú","u").replace("ñ","n"))
+        cc = (cc
+              .replace("í", "i").replace("á", "a").replace("é", "e")
+              .replace("ó", "o").replace("ú", "u").replace("ñ", "n"))
         new_cols.append(cc)
     df.columns = new_cols
 
@@ -91,7 +93,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         # KPI crudos / timing
         "created_at": ["created_at","created","createdat"],
         "first_admin_reply_at": ["first_admin_reply_at","firstadminreplyat","first_admin_reply","first_response_at"],
-        "first_contact_reply_at": ["first_contact_reply_at","firstcontactreplyat"],
+        "first_contact_reply_at": ["first_contact_reply_at","firstcontactreplyat","statistics_first_contact_reply_at","first_contact_reply_created_at"],
         "closed_at": ["closed_at","closed","first_close_at","statistics_first_close_at","statistics_last_close_at"],
         "ttr_seconds": ["ttr_seconds","time_to_first_close","statistics_time_to_first_close"],
         "first_response_seconds": ["first_response_seconds","first_response_time","first_reply_seconds"],
@@ -222,7 +224,8 @@ def _to_num(df, col):
     return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series([np.nan]*len(df))
 
 def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
-    """Calcula KPI usando columnas epoch (segundos) y/o segundos ya precalculados."""
+    """Calcula KPI usando columnas epoch (segundos) y/o segundos ya precalculados.
+       Devuelve valores numéricos o None; el formateo se hace en Notion."""
     created  = _to_num(df, "created_at")
     closed   = _to_num(df, "closed_at")
     far      = _to_num(df, "first_admin_reply_at")
@@ -230,7 +233,7 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
     frs      = _to_num(df, "first_response_seconds")
     ttr_secs = _to_num(df, "ttr_seconds")
 
-    # first_response_seconds: si falta, usar (first_admin_reply_at o first_contact_reply_at) - created_at
+    # first response seconds: si falta, usar (first_admin_reply_at o first_contact_reply_at) - created_at
     need_frs = frs.isna()
     base_first = far.where(~far.isna(), fcr)
     est_frs = base_first - created
@@ -245,32 +248,52 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
 
     # Tickets resueltos
     if "status" in df.columns:
-        tickets = int((df["status"].astype(str).str.lower() == "closed").sum())
-        if tickets == 0:
-            tickets = int(len(df))
+        tickets = int((df["status"].astype(str).str.lower() == "closed").sum()) or int(len(df))
     else:
         tickets = int(len(df))
 
     # % primera respuesta en SLA
     base = int(frs.notna().sum())
-    tasa_1ra = (float((frs <= sla_minutes*60).sum()) / base * 100.0) if base else None
+    ok = int((frs <= sla_minutes*60).sum()) if base else 0
+    tasa_1ra = (ok/base*100.0) if base else None
+    fr_p50 = float(np.nanmedian(frs)) if base else None  # segundos
 
-    # TTR promedio horas
-    ttr_horas = float(ttr_secs.mean())/3600.0 if ttr_secs.notna().any() else None
+    # TTR (h) – media, p50, p90
+    if ttr_secs.notna().any():
+        ttr_mean_h = float(np.nanmean(ttr_secs))/3600.0
+        ttr_p50_h  = float(np.nanpercentile(ttr_secs.dropna(), 50))/3600.0
+        ttr_p90_h  = float(np.nanpercentile(ttr_secs.dropna(), 90))/3600.0
+    else:
+        ttr_mean_h = ttr_p50_h = ttr_p90_h = None
 
     # CSAT
-    csat = None
+    csat = None; csat_n = 0
     if "csat" in df.columns:
         cs = pd.to_numeric(df["csat"], errors="coerce")
+        csat_n = int(cs.notna().sum())
         if cs.notna().any():
             csat = round(float(cs.mean()), 2)
 
     return {
         "tickets_resueltos": tickets,
-        "tasa_1ra_respuesta": f"{tasa_1ra:.0f}%" if isinstance(tasa_1ra, float) else "—",
-        "ttr_horas": round(ttr_horas, 2) if isinstance(ttr_horas, float) else "—",
-        "csat": csat if csat is not None else "—",
+        "tasa_1ra_respuesta": float(tasa_1ra) if isinstance(tasa_1ra, float) or isinstance(tasa_1ra, int) else None,
+        "first_base": base,
+        "first_ok": ok,
+        "first_resp_p50_s": float(fr_p50) if isinstance(fr_p50, float) else None,
+        "ttr_horas": float(ttr_mean_h) if isinstance(ttr_mean_h, float) else None,
+        "ttr_p50_h": float(ttr_p50_h) if isinstance(ttr_p50_h, float) else None,
+        "ttr_p90_h": float(ttr_p90_h) if isinstance(ttr_p90_h, float) else None,
+        "csat": csat,
+        "csat_n": csat_n,
     }
+
+def _fmt_min_from_sec(s):
+    if s is None: return "—"
+    return f"{int(round(s/60.0))} min"
+
+def _fmt_h(h):
+    if h is None: return "—"
+    return f"{h:.2f} h"
 
 # ===================== Gráficos =====================
 
@@ -488,7 +511,7 @@ def _parse_remote_origin(remote_url: str):
         owner_repo = u.split("github.com:")[-1]
     else:
         raise ValueError(f"No pude parsear remote.origin.url: {remote_url}")
-    parts = owner_repo.split("/")
+    parts = u.split("/")
     if len(parts) >= 2:
         return parts[-2], parts[-1]
     raise ValueError(f"URL inesperada: {remote_url}")
@@ -762,19 +785,15 @@ def notion_create_page(parent_page_id: str,
     # === KPIs a la vista (arriba de todo) ===
     blocks.append(_h2("KPIs a la vista"))
     if kpis:
-        ordered = [
-            ("Tickets resueltos", kpis.get("tickets_resueltos")),
-            ("% 1ra respuesta", kpis.get("tasa_1ra_respuesta")),
-            ("Tiempo medio de resolución", kpis.get("ttr_horas")),
-            ("Satisfacción (CSAT)", kpis.get("csat")),
-        ]
-        any_kpi = False
-        for label, val in ordered:
-            if val not in (None, "", "nan", "—"):
-                any_kpi = True
-                blocks.append(_bullet(f"{label}: {val}"))
-        if not any_kpi:
-            blocks.append(_para("—"))
+        blocks.append(_bullet(f"Tickets resueltos: {kpis.get('tickets_resueltos','—')}"))
+        pct_val = kpis.get("tasa_1ra_respuesta", None)
+        pct = f"{pct_val:.0f}%" if isinstance(pct_val, (int,float)) else "—"
+        base = kpis.get("first_base", 0); ok = kpis.get("first_ok", 0)
+        p50s = _fmt_min_from_sec(kpis.get("first_resp_p50_s"))
+        blocks.append(_bullet(f"% 1ra respuesta: {pct} ({ok}/{base}); mediana {p50s}"))
+        blocks.append(_bullet(f"Tiempo medio de resolución: {_fmt_h(kpis.get('ttr_horas'))} (p50 {_fmt_h(kpis.get('ttr_p50_h'))} • p90 {_fmt_h(kpis.get('ttr_p90_h'))})"))
+        csat = kpis.get("csat", None); csn = kpis.get("csat_n",0)
+        blocks.append(_bullet(f"Satisfacción (CSAT): {('—' if csat is None else csat)} (n={csn})"))
     else:
         blocks.append(_para("—"))
 
@@ -793,8 +812,8 @@ def notion_create_page(parent_page_id: str,
         blocks.append(_para("—"))
     else:
         for issue, casos in top3.items():
-            pct = f"{(casos/total_len*100):.0f}%"
-            blocks.append(_bullet(f"{issue} → {casos} casos ({pct})"))
+            pct_issue = f"{(casos/total_len*100):.0f}%"
+            blocks.append(_bullet(f"{issue} → {casos} casos ({pct_issue})"))
     if insights.get("top_issues"):
         blocks.append(_callout(insights["top_issues"], icon="💡"))
 
@@ -817,12 +836,32 @@ def notion_create_page(parent_page_id: str,
     if blk: blocks.append(blk)
     if insights.get("canal_por_issue"): blocks.append(_callout(insights["canal_por_issue"], icon="💡"))
 
-    # Categorizaciones Manuales
-    blocks.append(_h2("Análisis de Categorizaciones Manuales"))
-    for k, v in df["tema_norm"].value_counts().head(5).items():
-        blocks.append(_bullet(f"Tema • {k}: {v}"))
-    for k, v in df["motivo_norm"].value_counts().head(5).items():
-        blocks.append(_bullet(f"Motivo • {k}: {v}"))
+    # Categorizaciones Manuales (Tema/Motivo con H3 + insight)
+    blocks.append(_h2("Categorizaciones manuales"))
+
+    # --- Tema ---
+    blocks.append(_h3("Tema"))
+    tema_series = df["tema_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
+    tema_vc = tema_series[tema_series != ""].value_counts().head(5)
+    if len(tema_vc) == 0:
+        blocks.append(_para("—"))
+    else:
+        for k, v in tema_vc.items():
+            blocks.append(_bullet(f"{k}: {v}"))
+    if insights.get("tema_counts"):
+        blocks.append(_callout(insights["tema_counts"], icon="💡"))
+
+    # --- Motivo ---
+    blocks.append(_h3("Motivo"))
+    motivo_series = df["motivo_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
+    motivo_vc = motivo_series[motivo_series != ""].value_counts().head(5)
+    if len(motivo_vc) == 0:
+        blocks.append(_para("—"))
+    else:
+        for k, v in motivo_vc.items():
+            blocks.append(_bullet(f"{k}: {v}"))
+    if insights.get("motivo_counts"):
+        blocks.append(_callout(insights["motivo_counts"], icon="💡"))
 
     # Issues Detallados (tabla)
     blocks.append(_h2("Issues Detallados"))
@@ -901,7 +940,8 @@ def run(csv_path: str,
         github_branch: str = "main",
         assets_base_url: str | None = None,
         gemini_api_key: str | None = None,
-        gemini_model: str = "gemini-1.5-flash"):
+        gemini_model: str = "gemini-1.5-flash",
+        sla_first_reply_min: int = 15):
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -917,7 +957,7 @@ def run(csv_path: str,
     df = enforce_taxonomy(df)
 
     # KPI desde crudos
-    kpis = compute_kpis_from_raw_df(df, sla_minutes=15)
+    kpis = compute_kpis_from_raw_df(df, sla_minutes=sla_first_reply_min)
 
     # Issue grouping
     df["texto_base"] = df.apply(build_text_base, axis=1)
@@ -1004,7 +1044,7 @@ def run(csv_path: str,
             "urgencia_top_issues": f"{assets_base_url}/{os.path.basename(p_urg_top)}",
         }
 
-    # Gemini: insights y acciones
+    # Gemini: insights (incluye Tema/Motivo) y acciones
     insights = {}
     if gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
         for name, obj in [
@@ -1018,6 +1058,16 @@ def run(csv_path: str,
             txt = ai_insight_for_chart(name, obj, api_key=gemini_api_key, model=gemini_model)
             if txt:
                 insights[name] = txt
+
+        # Insights de Tema / Motivo
+        tema_counts = df["tema_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
+        tema_counts = tema_counts[tema_counts != ""].value_counts().head(5)
+        motivo_counts = df["motivo_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
+        motivo_counts = motivo_counts[motivo_counts != ""].value_counts().head(5)
+        ttxt = ai_insight_for_chart("top_temas", tema_counts.to_dict(), api_key=gemini_api_key, model=gemini_model)
+        mtxt = ai_insight_for_chart("top_motivos", motivo_counts.to_dict(), api_key=gemini_api_key, model=gemini_model)
+        if ttxt: insights["tema_counts"] = ttxt
+        if mtxt: insights["motivo_counts"] = mtxt
 
     acciones_ai = {}
     if gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
@@ -1083,6 +1133,7 @@ def main():
     ap.add_argument("--assets_base_url", default=None, help="URL base pública ya hosteada (si no publicas a GitHub)")
     ap.add_argument("--gemini_api_key", default=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"), help="API key de Gemini")
     ap.add_argument("--gemini_model", default="gemini-1.5-flash", help="Modelo de Gemini")
+    ap.add_argument("--sla_first_reply_min", type=int, default=15, help="SLA (min) para % 1ra respuesta")
     args = ap.parse_args()
 
     print("▶ Script iniciado")
@@ -1101,7 +1152,8 @@ def main():
         github_branch=args.github_branch,
         assets_base_url=args.assets_base_url,
         gemini_api_key=args.gemini_api_key,
-        gemini_model=args.gemini_model
+        gemini_model=args.gemini_model,
+        sla_first_reply_min=args.sla_first_reply_min
     )
 
 if __name__ == "__main__":
