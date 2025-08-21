@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
-Incluye: KPIs desde datos crudos, KPIs debajo de Resumen Ejecutivo con "tarjetas",
-resumen en bullets estilo solicitado, insights de Tema/Motivo, sanitizado de links,
-publicación de imágenes y smoke test de Gemini.
+- KPIs debajo de Resumen Ejecutivo (tarjetas + bullets)
+- IA con modos (full/lite/off), presupuesto y cache para evitar 429
+- Sanitizado de links y tablas nativas Notion
 """
 
 import os
@@ -12,6 +12,7 @@ import json
 import argparse
 import subprocess
 import shutil
+import hashlib
 from datetime import date
 import requests
 import pandas as pd
@@ -34,7 +35,6 @@ def strip_emojis(s: str) -> str:
         return s or ""
 
 def _norm_txt(s: str) -> str:
-    """Lower + quita tildes/diacríticos + trim."""
     if s is None:
         return ""
     s = str(s).strip().lower()
@@ -225,7 +225,6 @@ def _to_num(df, col):
     return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series([np.nan]*len(df))
 
 def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
-    """Calcula KPI usando columnas epoch (segundos) y/o segundos ya precalculados."""
     created  = _to_num(df, "created_at")
     closed   = _to_num(df, "closed_at")
     far      = _to_num(df, "first_admin_reply_at")
@@ -233,14 +232,14 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
     frs      = _to_num(df, "first_response_seconds")
     ttr_secs = _to_num(df, "ttr_seconds")
 
-    # first response seconds: (first_admin_reply_at o first_contact_reply_at) - created_at si falta
+    # first response seconds
     need_frs = frs.isna()
     base_first = far.where(~far.isna(), fcr)
     est_frs = base_first - created
     frs = frs.where(~need_frs, est_frs)
     frs = frs.where(frs >= 0, np.nan)
 
-    # TTR: si falta, usar closed - created
+    # TTR
     need_ttr = ttr_secs.isna()
     est_ttr = closed - created
     ttr_secs = ttr_secs.where(~need_ttr, est_ttr)
@@ -252,13 +251,13 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
     else:
         tickets = int(len(df))
 
-    # % primera respuesta en SLA
+    # % primera respuesta
     base = int(frs.notna().sum())
     ok = int((frs <= sla_minutes*60).sum()) if base else 0
     tasa_1ra = (ok/base*100.0) if base else None
-    fr_p50 = float(np.nanmedian(frs)) if base else None  # segundos
+    fr_p50 = float(np.nanmedian(frs)) if base else None
 
-    # TTR (h) – media, p50, p90
+    # TTR (h)
     if ttr_secs.notna().any():
         ttr_mean_h = float(np.nanmean(ttr_secs))/3600.0
         ttr_p50_h  = float(np.nanpercentile(ttr_secs.dropna(), 50))/3600.0
@@ -276,7 +275,7 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
 
     return {
         "tickets_resueltos": tickets,
-        "tasa_1ra_respuesta": float(tasa_1ra) if isinstance(tasa_ra:=tasa_1ra, (int,float)) else None,
+        "tasa_1ra_respuesta": float(tasa_1ra) if isinstance(tasa_1ra, (int,float)) else None,
         "first_base": base,
         "first_ok": ok,
         "first_resp_p50_s": float(fr_p50) if isinstance(fr_p50, float) else None,
@@ -411,18 +410,56 @@ def compare_with_prev(issues_df: pd.DataFrame, hist_dir="./hist") -> pd.DataFram
     issues_df["wow_change_pct"], issues_df["anomaly_flag"] = zip(*issues_df.apply(lambda r: calc(r["issue"], r["casos"]), axis=1))
     return issues_df
 
-# ===================== Gemini (API REST) =====================
+# ===================== Gemini (API REST) + presupuesto/cache =====================
 
-def gemini_generate_text(
-    prompt: str,
-    api_key: str | None = None,
-    model: str = "gemini-1.5-flash",
-    temperature: float = 0.3,
-    max_output_tokens: int = 256
-) -> str:
+class _AIBudget:
+    def __init__(self, budget:int):
+        self.budget = max(0, int(budget))
+        self.rate_limited = False
+    def take(self) -> bool:
+        if self.rate_limited or self.budget <= 0:
+            return False
+        self.budget -= 1
+        return True
+
+def _dataset_fingerprint(df: pd.DataFrame) -> str:
+    # Fingerprint compacto del contenido relevante
+    h = hashlib.sha256()
+    h.update(str(len(df)).encode())
+    counts = df["issue_group"].value_counts().to_dict() if "issue_group" in df.columns else {}
+    h.update(json.dumps(counts, sort_keys=True).encode())
+    if "created_at" in df.columns:
+        try:
+            h.update(str(pd.to_numeric(df["created_at"], errors="coerce").sum()).encode())
+        except Exception:
+            pass
+    return h.hexdigest()[:16]
+
+def _load_ai_cache(cache_path: str) -> dict:
+    try:
+        if os.path.exists(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_ai_cache(cache_path: str, cache_obj: dict):
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache_obj, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def gemini_generate_text(prompt: str,
+                         api_key: str | None = None,
+                         model: str = "gemini-1.5-flash",
+                         temperature: float = 0.3,
+                         max_output_tokens: int = 256) -> str:
     api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("⚠️ GEMINI_API_KEY/GOOGLE_API_KEY no seteado. Saltando generación de insight.")
+        print("⚠️ GEMINI_API_KEY/GOOGLE_API_KEY no seteado. Saltando.")
         return ""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -432,8 +469,11 @@ def gemini_generate_text(
     }
     try:
         r = requests.post(url, headers=headers, data=json.dumps(data), timeout=40)
+        if r.status_code == 429:
+            print(f"❌ Gemini HTTP 429 (rate limit).")
+            return "__RATE_LIMIT__"
         if not r.ok:
-            print(f"❌ Gemini HTTP {r.status_code}. Body: {r.text[:500]}")
+            print(f"❌ Gemini HTTP {r.status_code}. Body: {r.text[:400]}")
             return ""
         out = r.json()
         cand = (out.get("candidates") or [{}])[0]
@@ -479,11 +519,13 @@ def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None,
     prompt = (
         f"Eres PM/Analyst en una empresa de tickets. "
         f"Propón 1-3 acciones por categoría para '{issue}': Producto, Tech y CX. "
-        "Bullets concretos (≤14 palabras), sin relleno ni repeticiones. "
+        "Bullets concretos (≤14 palabras). "
         f"Contexto: {ctx_json}\n"
         "Devuelve SOLO JSON válido con claves 'Producto','Tech','CX'."
     )
     txt = gemini_generate_text(prompt, api_key=api_key, model=model, max_output_tokens=320)
+    if txt == "__RATE_LIMIT__":
+        return {"__rate_limited__": True}
     try:
         obj = json.loads(txt)
         out = {}
@@ -555,41 +597,22 @@ def publish_images_to_github(out_dir: str,
 
 # ===================== Notion helpers (bloques + URL sanitizer) =====================
 
-def _h1(text):
-    return {"object":"block","type":"heading_1","heading_1":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-
-def _h2(text):
-    return {"object":"block","type":"heading_2","heading_2":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-
-def _h3(text):
-    return {"object":"block","type":"heading_3","heading_3":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-
-def _para(text):
-    return {"object":"block","type":"paragraph","paragraph":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-
-def _bullet(text):
-    return {"object":"block","type":"bulleted_list_item","bulleted_list_item":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-
-def _todo(text, checked=False):
-    return {"object":"block","type":"to_do","to_do":{"rich_text":[{"type":"text","text":{"content":text}}],"checked":checked}}
-
-def _callout(text, icon="💡"):
-    return {"object":"block","type":"callout","callout":{"rich_text":[{"type":"text","text":{"content":text}}],"icon":{"type":"emoji","emoji":icon}}}
-
-def _divider():
-    return {"object":"block","type":"divider","divider":{}}
-
-def _rt(text: str):
-    return [{"type": "text", "text": {"content": str(text)}}]
+def _h1(text): return {"object":"block","type":"heading_1","heading_1":{"rich_text":[{"type":"text","text":{"content":text}}]}}
+def _h2(text): return {"object":"block","type":"heading_2","heading_2":{"rich_text":[{"type":"text","text":{"content":text}}]}}
+def _h3(text): return {"object":"block","type":"heading_3","heading_3":{"rich_text":[{"type":"text","text":{"content":text}}]}}
+def _para(text): return {"object":"block","type":"paragraph","paragraph":{"rich_text":[{"type":"text","text":{"content":text}}]}}
+def _bullet(text): return {"object":"block","type":"bulleted_list_item","bulleted_list_item":{"rich_text":[{"type":"text","text":{"content":text}}]}}
+def _todo(text, checked=False): return {"object":"block","type":"to_do","to_do":{"rich_text":[{"type":"text","text":{"content":text}}],"checked":checked}}
+def _callout(text, icon="💡"): return {"object":"block","type":"callout","callout":{"rich_text":[{"type":"text","text":{"content":text}}],"icon":{"type":"emoji","emoji":icon}}}
+def _divider(): return {"object":"block","type":"divider","divider":{}}
+def _rt(text: str): return [{"type": "text", "text": {"content": str(text)}}]
 
 URL_RX = re.compile(r'^https?://[^\s<>"\'\|\)\]]+$', re.IGNORECASE)
 
 def _clean_url(u: str) -> str | None:
-    if not isinstance(u, str):
-        return None
+    if not isinstance(u, str): return None
     u = u.strip().replace("\n", " ").replace("\r", " ")
-    if not u:
-        return None
+    if not u: return None
     u = u.split()[0].strip('\'"()[]')
     u = ''.join(ch for ch in u if 31 < ord(ch) < 127 and ch not in {'|'})
     if not (u.lower().startswith("http://") or u.lower().startswith("https://")):
@@ -612,32 +635,13 @@ def _image_external_if_valid(url: str | None, caption: str | None = None):
     return b
 
 def _column_list(columns_children: list[list[dict]]):
-    return {
-        "object":"block",
-        "type":"column_list",
-        "column_list":{"children":[{"object":"block","type":"column","column":{"children":ch}} for ch in columns_children]}
-    }
+    return {"object":"block","type":"column_list","column_list":{"children":[{"object":"block","type":"column","column":{"children":ch}} for ch in columns_children]}}
 
 def _notion_table(headers: list[str], rows: list[list[list[dict]]]):
-    table = {
-        "object":"block",
-        "type":"table",
-        "table":{
-            "table_width": len(headers),
-            "has_column_header": True,
-            "has_row_header": False,
-            "children":[]
-        }
-    }
-    table["table"]["children"].append({
-        "object":"block","type":"table_row",
-        "table_row":{"cells":[_rt(h) for h in headers]}
-    })
+    table = {"object":"block","type":"table","table":{"table_width": len(headers),"has_column_header": True,"has_row_header": False,"children":[]}}
+    table["table"]["children"].append({"object":"block","type":"table_row","table_row":{"cells":[_rt(h) for h in headers]}})
     for row in rows:
-        table["table"]["children"].append({
-            "object":"block","type":"table_row",
-            "table_row":{"cells": row}
-        })
+        table["table"]["children"].append({"object":"block","type":"table_row","table_row":{"cells": row}})
     return table
 
 def build_issues_table_block(resumen_df: pd.DataFrame) -> dict:
@@ -654,15 +658,8 @@ def build_issues_table_block(resumen_df: pd.DataFrame) -> dict:
                 urls.append(u); seen.add(u)
             if len(urls) >= 3:
                 break
-        if urls:
-            examples_rt = []
-            for i, u in enumerate(urls, start=1):
-                examples_rt.append(_link(f"Ejemplo {i}", u))
-                if i < len(urls):
-                    examples_rt.append({"type":"text","text":{"content":"  •  "}})
-        else:
-            examples_rt = [{"type":"text","text":{"content":"—"}}]
-
+        examples_rt = [{"type":"text","text":{"content":"—"}}] if not urls else sum(
+            [[_link(f"Ejemplo {i}", u)] + ([{"type":"text","text":{"content":"  •  "}}] if i < len(urls) else []) for i,u in enumerate(urls,1)], [])
         row_cells = [
             _rt(r.get("issue","")),
             _rt(str(int(r.get("casos",0) or 0))),
@@ -728,8 +725,7 @@ def build_actions_section_blocks(resumen_df: pd.DataFrame, top_n: int = 5, accio
 # -------- sanitizador transversal de links --------
 
 def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
-    blks = json.loads(json.dumps(blocks))  # deep copy
-
+    blks = json.loads(json.dumps(blocks))
     def strip_or_fix_rt(rt_list):
         for tkn in rt_list:
             if tkn.get("type") == "text":
@@ -741,7 +737,6 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
                     else:
                         tkn["text"]["link"]["url"] = safe
         return rt_list
-
     for b in blks:
         t = b.get("type")
         if t in ("paragraph","bulleted_list_item","to_do","heading_1","heading_2","heading_3","callout"):
@@ -761,14 +756,12 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
                     cap_rt = img.get("caption") or []
                     if cap_rt and cap_rt[0].get("type") == "text":
                         caption = cap_rt[0]["text"].get("content","")
-                    b.clear()
-                    b.update(_para(caption or ""))
+                    b.clear(); b.update(_para(caption or ""))
                 else:
                     img["external"]["url"] = safe
             cap = img.get("caption", [])
             if cap:
                 b["image"]["caption"] = strip_or_fix_rt(cap)
-
     return blks
 
 # ---------- KPIs UI helpers ----------
@@ -780,12 +773,10 @@ def _metric_card(title: str, value: str, sub: str = "", icon: str = "📊") -> d
 def build_kpi_section_blocks(kpis: dict | None, total_items: int) -> list[dict]:
     blocks = []
     blocks.append(_h2("KPIs a la vista"))
-
     if not kpis:
         blocks.append(_para("—"))
         return blocks
 
-    # Strings
     tickets = str(kpis.get("tickets_resueltos","—"))
     pct_val = kpis.get("tasa_1ra_respuesta", None)
     pct = f"{pct_val:.0f}%" if isinstance(pct_val, (int,float)) else "—"
@@ -798,7 +789,6 @@ def build_kpi_section_blocks(kpis: dict | None, total_items: int) -> list[dict]:
     csat_txt = "—" if csat is None else f"{csat:.2f}"
     sla = kpis.get("sla_minutes", 15)
 
-    # Tarjetas en columnas (2 filas)
     row1 = [
         [_metric_card("Tickets resueltos", tickets, f"Total convers. procesadas: {total_items}", "🎟️")],
         [_metric_card("% 1ra respuesta en SLA", pct, f"SLA {sla} min • {ok}/{base}", "⚡")],
@@ -807,13 +797,11 @@ def build_kpi_section_blocks(kpis: dict | None, total_items: int) -> list[dict]:
     ]
     blocks.append(_column_list([c for c in row1]))
 
-    # Resumen en bullets (formato solicitado)
     blocks.append(_divider())
     blocks.append(_bullet(f"Tickets resueltos: {tickets}"))
     blocks.append(_bullet(f"% 1ra respuesta: {pct} ({ok}/{base}); mediana {med_first}"))
     blocks.append(_bullet(f"Tiempo medio de resolución: {ttr_mean} (p50 {ttr_p50} • p90 {ttr_p90})"))
     blocks.append(_bullet(f"Satisfacción (CSAT): {('—' if csat is None else f'{csat_txt}')} (n={csn})"))
-
     return blocks
 
 # ===================== Página Notion =====================
@@ -831,14 +819,14 @@ def notion_create_page(parent_page_id: str,
     blocks = []
     blocks.append(_h1(page_title))
 
-    # Resumen Ejecutivo
+    # Resumen
     blocks.append(_h2("Resumen Ejecutivo"))
     blocks.append(_para(f"📅 Fecha del análisis: {meta.get('fecha','')}"))
     blocks.append(_para(f"📂 Fuente de datos: {meta.get('fuente','')}"))
     blocks.append(_para(f"💬 Conversaciones procesadas: {meta.get('total','')}"))
     blocks.append(_para("Durante el periodo analizado se registraron conversaciones en Intercom, procesadas por IA para identificar patrones, problemas recurrentes y oportunidades de mejora."))
 
-    # === KPIs debajo del Resumen Ejecutivo ===
+    # KPIs
     blocks.extend(build_kpi_section_blocks(kpis, total_items=len(df)))
 
     # Top 3 issues
@@ -854,31 +842,27 @@ def notion_create_page(parent_page_id: str,
     if insights.get("top_issues"):
         blocks.append(_callout(insights["top_issues"], icon="💡"))
 
-    # Gráficos + insights
-    blk = _image_external_if_valid(chart_urls.get("top_issues"), "Top Issues")
-    if blk: blocks.append(blk)
-    blk = _image_external_if_valid(chart_urls.get("urgencia_pie"), "Distribución de Urgencias")
-    if blk: blocks.append(blk)
-    if insights.get("urgencia_pie"): blocks.append(_callout(insights["urgencia_pie"], icon="💡"))
-    blk = _image_external_if_valid(chart_urls.get("sentimiento_pie"), "Distribución de Sentimientos")
-    if blk: blocks.append(blk)
-    if insights.get("sentimiento_pie"): blocks.append(_callout(insights["sentimiento_pie"], icon="💡"))
-    blk = _image_external_if_valid(chart_urls.get("urgencia_por_issue"), "Urgencia por Issue")
-    if blk: blocks.append(blk)
-    if insights.get("urgencia_por_issue"): blocks.append(_callout(insights["urgencia_por_issue"], icon="💡"))
-    blk = _image_external_if_valid(chart_urls.get("urgencia_top_issues"), "Urgencias en Top Issues (agrupadas)")
-    if blk: blocks.append(blk)
-    if insights.get("urgencia_top_issues"): blocks.append(_callout(insights["urgencia_top_issues"], icon="💡"))
-    blk = _image_external_if_valid(chart_urls.get("canal_por_issue"), "Canal por Issue")
-    if blk: blocks.append(blk)
-    if insights.get("canal_por_issue"): blocks.append(_callout(insights["canal_por_issue"], icon="💡"))
+    # Gráficos + insights (robusto ante URLs/insights faltantes)
+    for key, caption in [
+        ("top_issues", "Top Issues"),
+        ("urgencia_pie", "Distribución de Urgencias"),
+        ("sentimiento_pie", "Distribución de Sentimientos"),
+        ("urgencia_por_issue", "Urgencia por Issue"),
+        ("urgencia_top_issues", "Urgencias en Top Issues (agrupadas)"),
+        ("canal_por_issue", "Canal por Issue"),
+    ]:
+        blk = _image_external_if_valid((chart_urls or {}).get(key), caption)
+        if blk:
+            blocks.append(blk)
+        if insights.get(key):
+            blocks.append(_callout(insights[key], icon="💡"))
 
-    # Categorizaciones Manuales (Tema/Motivo con H3 + insight)
+    # Categorizaciones manuales
     blocks.append(_h2("Categorizaciones manuales"))
 
-    # --- Tema ---
+    # Tema
     blocks.append(_h3("Tema"))
-    tema_series = df["tema_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
+    tema_series = df["tema_norm"].fillna("").replace({"nan": ""}).astype(str).str.strip()
     tema_vc = tema_series[tema_series != ""].value_counts().head(5)
     if len(tema_vc) == 0:
         blocks.append(_para("—"))
@@ -888,9 +872,9 @@ def notion_create_page(parent_page_id: str,
     if insights.get("tema_counts"):
         blocks.append(_callout(insights["tema_counts"], icon="💡"))
 
-    # --- Motivo ---
+    # Motivo
     blocks.append(_h3("Motivo"))
-    motivo_series = df["motivo_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
+    motivo_series = df["motivo_norm"].fillna("").replace({"nan": ""}).astype(str).str.strip()
     motivo_vc = motivo_series[motivo_series != ""].value_counts().head(5)
     if len(motivo_vc) == 0:
         blocks.append(_para("—"))
@@ -904,10 +888,10 @@ def notion_create_page(parent_page_id: str,
     blocks.append(_h2("Issues Detallados"))
     blocks.append(build_issues_table_block(resumen_df))
 
-    # Acciones A Evaluar
+    # Acciones a evaluar
     blocks.extend(build_actions_section_blocks(resumen_df, top_n=5, acciones_ai=acciones_ai))
 
-    # Sanitizado
+    # Sanitizado final de enlaces
     safe_children = _sanitize_links_in_blocks(blocks)
 
     payload = {
@@ -926,12 +910,13 @@ def notion_create_page(parent_page_id: str,
         data=json.dumps(payload)
     )
 
+    # Retry sin links si Notion protesta por URLs inválidas
     if not resp.ok and ("Invalid URL" in (resp.text or "") or "link" in (resp.text or "").lower()):
         def strip_all_links(blks: list[dict]) -> list[dict]:
             blks = json.loads(json.dumps(blks))
             for b in blks:
                 t = b.get("type")
-                if t in ("paragraph","bulleted_list_item","to_do","heading_1","heading_2","heading_3","callout"):
+                if t in ("paragraph", "bulleted_list_item", "to_do", "heading_1", "heading_2", "heading_3", "callout"):
                     rt = b.get(t, {}).get("rich_text", [])
                     for tkn in rt:
                         if tkn.get("type") == "text" and tkn.get("text", {}).get("link"):
@@ -978,12 +963,11 @@ def run(csv_path: str,
         assets_base_url: str | None = None,
         gemini_api_key: str | None = None,
         gemini_model: str = "gemini-1.5-flash",
-        sla_first_reply_min: int = 15):
+        sla_first_reply_min: int = 15,
+        ai_mode: str = "full",
+        ai_budget: int = 100):
 
     os.makedirs(out_dir, exist_ok=True)
-
-    # Smoke test de Gemini
-    _gemini_smoke_test(gemini_api_key, gemini_model)
 
     # Lectura + normalización + taxonomías
     df = load_csv_robusto(csv_path)
@@ -1032,7 +1016,6 @@ def run(csv_path: str,
                       "categoria","urgencia","sentimiento","resumen_ia","insight_ia",
                       "palabras_clave","issue_group","risk","sla_now","taxonomy_flag",
                       "link_a_intercom","id_intercom",
-                      # KPI crudos para auditoría
                       "created_at","first_admin_reply_at","first_contact_reply_at","closed_at",
                       "first_response_seconds","ttr_seconds","status","csat"]
     existing = [c for c in df_export_cols if c in df.columns]
@@ -1081,34 +1064,78 @@ def run(csv_path: str,
             "urgencia_top_issues": f"{assets_base_url}/{os.path.basename(p_urg_top)}",
         }
 
-    # Gemini: insights (incluye Tema/Motivo) y acciones
+    # ===== IA: modos, presupuesto y cache =====
+    # Configurar presupuesto según modo
+    mode = (ai_mode or "full").strip().lower()
+    if mode == "off":
+        budget = 0
+    elif mode == "lite":
+        budget = min(ai_budget, 6) if ai_budget else 6
+    else:
+        budget = ai_budget if ai_budget else 100
+
+    ai = _AIBudget(budget)
+    cache_path = os.path.join(out_dir, "hist", "ai_cache.json")
+    cache = _load_ai_cache(cache_path)
+    fp = _dataset_fingerprint(df)
+
     insights = {}
-    if gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
-        for name, obj in [
-            ("top_issues", top_counts.to_dict()),
-            ("urgencia_pie", urg_counts.to_dict()),
-            ("sentimiento_pie", sent_counts.to_dict()),
-            ("urgencia_por_issue", urg_issue_ct),
-            ("urgencia_top_issues", urg_top_ct),
-            ("canal_por_issue", canal_issue_ct),
-        ]:
+    acciones_ai = {}
+
+    if fp in cache:
+        cached = cache[fp]
+        insights = cached.get("insights", {})
+        acciones_ai = cached.get("acciones_ai", {})
+        print("♻️ Reutilizando insights desde cache.")
+    elif budget > 0 and (gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
+        # Prioridad: top_issues, luego urgencia_pie, sentimiento_pie, luego 2 tablas cruzadas si hay budget.
+        def try_insight(name, obj):
+            nonlocal insights
+            if not ai.take():
+                return
             txt = ai_insight_for_chart(name, obj, api_key=gemini_api_key, model=gemini_model)
+            if txt == "__RATE_LIMIT__":
+                ai.rate_limited = True
+                return
             if txt:
                 insights[name] = txt
 
-        # Insights de Tema / Motivo
-        tema_counts = df["tema_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
-        tema_counts = tema_counts[tema_counts != ""].value_counts().head(5)
-        motivo_counts = df["motivo_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
-        motivo_counts = motivo_counts[motivo_counts != ""].value_counts().head(5)
-        ttxt = ai_insight_for_chart("top_temas", tema_counts.to_dict(), api_key=gemini_api_key, model=gemini_model)
-        mtxt = ai_insight_for_chart("top_motivos", motivo_counts.to_dict(), api_key=gemini_api_key, model=gemini_model)
-        if ttxt: insights["tema_counts"] = ttxt
-        if mtxt: insights["motivo_counts"] = mtxt
+        # Insights de gráficos (orden de valor)
+        try_insight("top_issues", top_counts.to_dict())
+        try_insight("urgencia_pie", urg_counts.to_dict())
+        try_insight("sentimiento_pie", sent_counts.to_dict())
+        if not ai.rate_limited:
+            try_insight("urgencia_por_issue", urg_issue_ct)
+        if not ai.rate_limited:
+            try_insight("canal_por_issue", canal_issue_ct)
+        if not ai.rate_limited:
+            try_insight("urgencia_top_issues", urg_top_ct)
 
-    acciones_ai = {}
-    if gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
-        for _, row in resumen_df.head(5).iterrows():
+        # Insights de Tema/Motivo (1 llamada cada uno, solo en full o si queda budget)
+        if not ai.rate_limited and (mode == "full" or ai.budget >= 2):
+            tema_counts = df["tema_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
+            tema_counts = tema_counts[tema_counts != ""].value_counts().head(5)
+            if ai.take():
+                ttxt = ai_insight_for_chart("top_temas", tema_counts.to_dict(), api_key=gemini_api_key, model=gemini_model)
+                if ttxt and ttxt != "__RATE_LIMIT__":
+                    insights["tema_counts"] = ttxt
+                elif ttxt == "__RATE_LIMIT__":
+                    ai.rate_limited = True
+
+            if not ai.rate_limited and ai.take():
+                motivo_counts = df["motivo_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
+                motivo_counts = motivo_counts[motivo_counts != ""].value_counts().head(5)
+                mtxt = ai_insight_for_chart("top_motivos", motivo_counts.to_dict(), api_key=gemini_api_key, model=gemini_model)
+                if mtxt and mtxt != "__RATE_LIMIT__":
+                    insights["motivo_counts"] = mtxt
+                elif mtxt == "__RATE_LIMIT__":
+                    ai.rate_limited = True
+
+        # Acciones por issue (limitado por modo/presupuesto)
+        max_actions = 5 if mode == "full" else 2 if mode == "lite" else 0
+        for _, row in resumen_df.head(max_actions).iterrows():
+            if ai.rate_limited or not ai.take():
+                break
             issue = str(row.get("issue",""))
             ctx = {
                 "canales_top": str(row.get("canales_top","")),
@@ -1119,8 +1146,16 @@ def run(csv_path: str,
                 "total_casos_semana": total
             }
             add = ai_actions_for_issue(issue, ctx, api_key=gemini_api_key, model=gemini_model)
+            if add.get("__rate_limited__"):
+                ai.rate_limited = True
+                break
             if add:
                 acciones_ai[issue] = add
+
+        # Guardar cache si logramos algo
+        if insights or acciones_ai:
+            cache[fp] = {"insights": insights, "acciones_ai": acciones_ai}
+            _save_ai_cache(cache_path, cache)
 
     # Notion
     if notion_token and notion_parent:
@@ -1152,8 +1187,7 @@ def run(csv_path: str,
                 "canal_por_issue": p_canal_issue,
                 "urgencia_top_issues": p_urg_top
             },
-            "insights": insights,
-            "kpis": kpis
+            "insights": insights
         }, indent=2, ensure_ascii=False))
 
 # ===================== CLI =====================
@@ -1171,6 +1205,8 @@ def main():
     ap.add_argument("--gemini_api_key", default=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"), help="API key de Gemini")
     ap.add_argument("--gemini_model", default="gemini-1.5-flash", help="Modelo de Gemini")
     ap.add_argument("--sla_first_reply_min", type=int, default=15, help="SLA (min) para % 1ra respuesta")
+    ap.add_argument("--ai_mode", choices=["full","lite","off"], default="full", help="Nivel de generación con IA")
+    ap.add_argument("--ai_budget", type=int, default=100, help="Máximo de requests a Gemini por corrida")
     args = ap.parse_args()
 
     print("▶ Script iniciado")
@@ -1190,7 +1226,9 @@ def main():
         assets_base_url=args.assets_base_url,
         gemini_api_key=args.gemini_api_key,
         gemini_model=args.gemini_model,
-        sla_first_reply_min=args.sla_first_reply_min
+        sla_first_reply_min=args.sla_first_reply_min,
+        ai_mode=args.ai_mode,
+        ai_budget=args.ai_budget
     )
 
 if __name__ == "__main__":
