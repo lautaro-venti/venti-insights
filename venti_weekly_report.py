@@ -977,6 +977,9 @@ def run(csv_path: str,
             df[col] = df[col].astype(object)
     df = enforce_taxonomy(df)
 
+    # Prueba rápida de Gemini
+    _gemini_smoke_test(gemini_api_key, gemini_model)
+
     # KPI desde crudos
     kpis = compute_kpis_from_raw_df(df, sla_minutes=sla_first_reply_min)
 
@@ -1065,7 +1068,6 @@ def run(csv_path: str,
         }
 
     # ===== IA: modos, presupuesto y cache =====
-    # Configurar presupuesto según modo
     mode = (ai_mode or "full").strip().lower()
     if mode == "off":
         budget = 0
@@ -1086,9 +1088,9 @@ def run(csv_path: str,
         cached = cache[fp]
         insights = cached.get("insights", {})
         acciones_ai = cached.get("acciones_ai", {})
-        print("♻️ Reutilizando insights desde cache.")
+        print(f"♻️ Reutilizando insights desde cache. insights={len(insights)} | acciones={len(acciones_ai)}")
     elif budget > 0 and (gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
-        # Prioridad: top_issues, luego urgencia_pie, sentimiento_pie, luego 2 tablas cruzadas si hay budget.
+        # Helper para gastar "fichas" de IA
         def try_insight(name, obj):
             nonlocal insights
             if not ai.take():
@@ -1111,7 +1113,7 @@ def run(csv_path: str,
         if not ai.rate_limited:
             try_insight("urgencia_top_issues", urg_top_ct)
 
-        # Insights de Tema/Motivo (1 llamada cada uno, solo en full o si queda budget)
+        # Insights de Tema/Motivo
         if not ai.rate_limited and (mode == "full" or ai.budget >= 2):
             tema_counts = df["tema_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
             tema_counts = tema_counts[tema_counts != ""].value_counts().head(5)
@@ -1131,7 +1133,7 @@ def run(csv_path: str,
                 elif mtxt == "__RATE_LIMIT__":
                     ai.rate_limited = True
 
-        # Acciones por issue (limitado por modo/presupuesto)
+        # Acciones por issue
         max_actions = 5 if mode == "full" else 2 if mode == "lite" else 0
         for _, row in resumen_df.head(max_actions).iterrows():
             if ai.rate_limited or not ai.take():
@@ -1156,6 +1158,10 @@ def run(csv_path: str,
         if insights or acciones_ai:
             cache[fp] = {"insights": insights, "acciones_ai": acciones_ai}
             _save_ai_cache(cache_path, cache)
+
+    # ---- Resumen de uso de IA (used) ----
+    used = budget - ai.budget
+    print(f"🤖 IA → modo={mode} | usadas={used}/{budget} | rate_limited={ai.rate_limited} | insights={len(insights)} | acciones={len(acciones_ai)}")
 
     # Notion
     if notion_token and notion_parent:
