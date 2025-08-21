@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
-Incluye: KPIs desde datos crudos, KPIs al inicio, insights de Tema/Motivo,
-sanitizado de links, publicación de imágenes y smoke test de Gemini.
+Incluye: KPIs desde datos crudos, KPIs debajo de Resumen Ejecutivo con "tarjetas",
+resumen en bullets estilo solicitado, insights de Tema/Motivo, sanitizado de links,
+publicación de imágenes y smoke test de Gemini.
 """
 
 import os
@@ -224,8 +225,7 @@ def _to_num(df, col):
     return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series([np.nan]*len(df))
 
 def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
-    """Calcula KPI usando columnas epoch (segundos) y/o segundos ya precalculados.
-       Devuelve valores numéricos o None; el formateo se hace en Notion."""
+    """Calcula KPI usando columnas epoch (segundos) y/o segundos ya precalculados."""
     created  = _to_num(df, "created_at")
     closed   = _to_num(df, "closed_at")
     far      = _to_num(df, "first_admin_reply_at")
@@ -233,7 +233,7 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
     frs      = _to_num(df, "first_response_seconds")
     ttr_secs = _to_num(df, "ttr_seconds")
 
-    # first response seconds: si falta, usar (first_admin_reply_at o first_contact_reply_at) - created_at
+    # first response seconds: (first_admin_reply_at o first_contact_reply_at) - created_at si falta
     need_frs = frs.isna()
     base_first = far.where(~far.isna(), fcr)
     est_frs = base_first - created
@@ -276,7 +276,7 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
 
     return {
         "tickets_resueltos": tickets,
-        "tasa_1ra_respuesta": float(tasa_1ra) if isinstance(tasa_1ra, float) or isinstance(tasa_1ra, int) else None,
+        "tasa_1ra_respuesta": float(tasa_1ra) if isinstance(tasa_ra:=tasa_1ra, (int,float)) else None,
         "first_base": base,
         "first_ok": ok,
         "first_resp_p50_s": float(fr_p50) if isinstance(fr_p50, float) else None,
@@ -285,6 +285,7 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
         "ttr_p90_h": float(ttr_p90_h) if isinstance(ttr_p90_h, float) else None,
         "csat": csat,
         "csat_n": csat_n,
+        "sla_minutes": sla_minutes,
     }
 
 def _fmt_min_from_sec(s):
@@ -575,6 +576,9 @@ def _todo(text, checked=False):
 def _callout(text, icon="💡"):
     return {"object":"block","type":"callout","callout":{"rich_text":[{"type":"text","text":{"content":text}}],"icon":{"type":"emoji","emoji":icon}}}
 
+def _divider():
+    return {"object":"block","type":"divider","divider":{}}
+
 def _rt(text: str):
     return [{"type": "text", "text": {"content": str(text)}}]
 
@@ -721,7 +725,7 @@ def build_actions_section_blocks(resumen_df: pd.DataFrame, top_n: int = 5, accio
         blocks.append(_column_list([col_prod, col_tech, col_cx]))
     return blocks
 
-# -------- sanitizador transversal de links en TODOS los bloques --------
+# -------- sanitizador transversal de links --------
 
 def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
     blks = json.loads(json.dumps(blocks))  # deep copy
@@ -767,6 +771,51 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
 
     return blks
 
+# ---------- KPIs UI helpers ----------
+
+def _metric_card(title: str, value: str, sub: str = "", icon: str = "📊") -> dict:
+    text = f"{title}: {value}" if not sub else f"{title}: {value}\n{sub}"
+    return _callout(text, icon=icon)
+
+def build_kpi_section_blocks(kpis: dict | None, total_items: int) -> list[dict]:
+    blocks = []
+    blocks.append(_h2("KPIs a la vista"))
+
+    if not kpis:
+        blocks.append(_para("—"))
+        return blocks
+
+    # Strings
+    tickets = str(kpis.get("tickets_resueltos","—"))
+    pct_val = kpis.get("tasa_1ra_respuesta", None)
+    pct = f"{pct_val:.0f}%" if isinstance(pct_val, (int,float)) else "—"
+    base = kpis.get("first_base", 0); ok = kpis.get("first_ok", 0)
+    med_first = _fmt_min_from_sec(kpis.get("first_resp_p50_s"))
+    ttr_mean = _fmt_h(kpis.get("ttr_horas"))
+    ttr_p50  = _fmt_h(kpis.get("ttr_p50_h"))
+    ttr_p90  = _fmt_h(kpis.get("ttr_p90_h"))
+    csat = kpis.get("csat", None); csn = kpis.get("csat_n",0)
+    csat_txt = "—" if csat is None else f"{csat:.2f}"
+    sla = kpis.get("sla_minutes", 15)
+
+    # Tarjetas en columnas (2 filas)
+    row1 = [
+        [_metric_card("Tickets resueltos", tickets, f"Total convers. procesadas: {total_items}", "🎟️")],
+        [_metric_card("% 1ra respuesta en SLA", pct, f"SLA {sla} min • {ok}/{base}", "⚡")],
+        [_metric_card("TTR medio", ttr_mean, f"p50 {ttr_p50} • p90 {ttr_p90}", "⏱️")],
+        [_metric_card("CSAT", csat_txt, f"n={csn}", "⭐")],
+    ]
+    blocks.append(_column_list([c for c in row1]))
+
+    # Resumen en bullets (formato solicitado)
+    blocks.append(_divider())
+    blocks.append(_bullet(f"Tickets resueltos: {tickets}"))
+    blocks.append(_bullet(f"% 1ra respuesta: {pct} ({ok}/{base}); mediana {med_first}"))
+    blocks.append(_bullet(f"Tiempo medio de resolución: {ttr_mean} (p50 {ttr_p50} • p90 {ttr_p90})"))
+    blocks.append(_bullet(f"Satisfacción (CSAT): {('—' if csat is None else f'{csat_txt}')} (n={csn})"))
+
+    return blocks
+
 # ===================== Página Notion =====================
 
 def notion_create_page(parent_page_id: str,
@@ -782,27 +831,15 @@ def notion_create_page(parent_page_id: str,
     blocks = []
     blocks.append(_h1(page_title))
 
-    # === KPIs a la vista (arriba de todo) ===
-    blocks.append(_h2("KPIs a la vista"))
-    if kpis:
-        blocks.append(_bullet(f"Tickets resueltos: {kpis.get('tickets_resueltos','—')}"))
-        pct_val = kpis.get("tasa_1ra_respuesta", None)
-        pct = f"{pct_val:.0f}%" if isinstance(pct_val, (int,float)) else "—"
-        base = kpis.get("first_base", 0); ok = kpis.get("first_ok", 0)
-        p50s = _fmt_min_from_sec(kpis.get("first_resp_p50_s"))
-        blocks.append(_bullet(f"% 1ra respuesta: {pct} ({ok}/{base}); mediana {p50s}"))
-        blocks.append(_bullet(f"Tiempo medio de resolución: {_fmt_h(kpis.get('ttr_horas'))} (p50 {_fmt_h(kpis.get('ttr_p50_h'))} • p90 {_fmt_h(kpis.get('ttr_p90_h'))})"))
-        csat = kpis.get("csat", None); csn = kpis.get("csat_n",0)
-        blocks.append(_bullet(f"Satisfacción (CSAT): {('—' if csat is None else csat)} (n={csn})"))
-    else:
-        blocks.append(_para("—"))
-
     # Resumen Ejecutivo
     blocks.append(_h2("Resumen Ejecutivo"))
     blocks.append(_para(f"📅 Fecha del análisis: {meta.get('fecha','')}"))
     blocks.append(_para(f"📂 Fuente de datos: {meta.get('fuente','')}"))
     blocks.append(_para(f"💬 Conversaciones procesadas: {meta.get('total','')}"))
     blocks.append(_para("Durante el periodo analizado se registraron conversaciones en Intercom, procesadas por IA para identificar patrones, problemas recurrentes y oportunidades de mejora."))
+
+    # === KPIs debajo del Resumen Ejecutivo ===
+    blocks.extend(build_kpi_section_blocks(kpis, total_items=len(df)))
 
     # Top 3 issues
     blocks.append(_h2("Top 3 issues"))
@@ -1158,8 +1195,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
