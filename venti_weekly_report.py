@@ -18,6 +18,7 @@ import requests
 import pandas as pd
 import numpy as np
 import unicodedata
+import time
 
 # Matplotlib headless
 import matplotlib
@@ -540,11 +541,9 @@ def _save_ai_cache(cache_path: str, cache_obj: dict):
     except Exception:
         pass
 
-def gemini_generate_text(prompt: str,
-                         api_key: str | None = None,
-                         model: str = "gemini-1.5-flash",
-                         temperature: float = 0.3,
-                         max_output_tokens: int = 256) -> str:
+def gemini_generate_text(prompt, api_key=None, model="gemini-1.5-flash",
+                         temperature=0.3, max_output_tokens=256,
+                         retries=4, backoff=2.0):
     api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         print("⚠️ GEMINI_API_KEY/GOOGLE_API_KEY no seteado. Saltando.")
@@ -555,25 +554,29 @@ def gemini_generate_text(prompt: str,
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": temperature, "maxOutputTokens": max_output_tokens}
     }
-    try:
-        r = requests.post(url, headers=headers, data=json.dumps(data), timeout=40)
-        if r.status_code == 429:
-            print(f"❌ Gemini HTTP 429 (rate limit).")
-            return "__RATE_LIMIT__"
-        if not r.ok:
-            print(f"❌ Gemini HTTP {r.status_code}. Body: {r.text[:400]}")
-            return ""
-        out = r.json()
-        cand = (out.get("candidates") or [{}])[0]
-        parts = ((cand.get("content") or {}).get("parts") or [{}])
-        text = parts[0].get("text", "").strip()
-        return text
-    except requests.Timeout:
-        print("⏱️ Timeout llamando a Gemini.")
-        return ""
-    except Exception as e:
-        print(f"❌ Excepción llamando a Gemini: {e}")
-        return ""
+    for attempt in range(retries):
+        try:
+            r = requests.post(url, headers=headers, data=json.dumps(data), timeout=40)
+            if r.status_code == 429:
+                print("❌ Gemini 429 (rate limit).")
+                return "__RATE_LIMIT__"
+            if r.status_code == 503:
+                wait = backoff ** attempt
+                print(f"❌ Gemini 503 (overloaded). Retry {attempt+1}/{retries} en {wait:.1f}s")
+                time.sleep(wait)
+                continue
+            if not r.ok:
+                print(f"❌ Gemini HTTP {r.status_code}. Body: {r.text[:400]}")
+                return "__UNAVAILABLE__"
+            out = r.json()
+            cand = (out.get("candidates") or [{}])[0]
+            parts = ((cand.get("content") or {}).get("parts") or [{}])
+            return parts[0].get("text", "").strip()
+        except requests.Timeout:
+            print("⏱️ Timeout Gemini.")
+        except Exception as e:
+            print(f"❌ Excepción Gemini: {e}")
+    return "__UNAVAILABLE__"
 
 def _gemini_smoke_test(api_key: str | None, model: str) -> None:
     if not (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
