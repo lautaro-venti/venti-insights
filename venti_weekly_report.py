@@ -28,6 +28,20 @@ import matplotlib.pyplot as plt
 
 EMOJI_RX = re.compile(r"[\U00010000-\U0010FFFF]", flags=re.UNICODE)
 
+def _safe_str(v: object) -> str:
+    try:
+        if v is None: 
+            return ""
+        # pandas NaN
+        if isinstance(v, float) and pd.isna(v):
+            return ""
+        s = str(v)
+        if s.lower() == "nan":
+            return ""
+        return s
+    except Exception:
+        return ""
+
 def strip_emojis(s: str) -> str:
     try:
         return EMOJI_RX.sub("", s or "")
@@ -169,6 +183,81 @@ def build_text_base(row: pd.Series) -> str:
             parts.append(val)
     return " | ".join(parts)
 
+# ----------------- NUEVO: CSAT, ESTADO FINAL e ISSUE BUCKETS -----------------
+
+def pick_csats(row):
+    for k in ["csat", "csat_ic", "csat_intercom", "csat_ia", "csat_modelo", "csat_gemini"]:
+        if k in row and pd.notna(row[k]):
+            try:
+                v = int(float(row[k]))
+                if 1 <= v <= 5:
+                    return v
+            except:
+                pass
+    return np.nan
+
+def estado_final_from(row):
+    if "estado_final" in row and pd.notna(row["estado_final"]):
+        return str(row["estado_final"]).strip().capitalize()
+
+    status = str(row.get("status","")).strip().lower()
+    resumen = str(row.get("resumen_ia","") or row.get("resumen","")).strip().lower()
+
+    if "estado final: resuelto" in resumen or "resuelto" in resumen:
+        return "Resuelto"
+    if "estado final: pendiente" in resumen or "pendiente" in resumen:
+        return "Pendiente"
+    if "sin respuesta" in resumen or "estado final: sin respuesta" in resumen:
+        return "Sin respuesta"
+
+    if status == "closed":
+        return "Resuelto"
+    if status in {"open","snoozed"}:
+        return "Pendiente"
+    return "No resuelto"
+
+ISSUE_MAP = {
+    "No recibí mi entrada": "Entrega de entradas",
+    "QR Shield": "QR / Validación en acceso",
+    "Pagos": "Pagos / cobros",
+    "Venti Swap": "Venti Swap",
+    "Servicios operativos": "App / rendimiento / bug",
+    "Consulta por evento": "Información de evento",
+    "Transferencia de entradas": "Transferencia / titularidad",
+    "Devolución": "Reembolso / devolución",
+    "Contacto Comercial": "Comercial",
+    "_default": "Otros",
+}
+ISSUE_REGEX_RULES = [
+    ("Entrega de entradas", r"(no\s*recib|reenv[ií]o|link\s*de\s*entrada|entrada(s)?\s*(no)?\s*llega|ticket\s*no|no\s*me\s*ll[eé]g[oó])"),
+    ("Transferencia / titularidad", r"(transferenc|cambio\s*de\s*titular|modificar\s*(nombre|titular)|pasar\s*entrada)"),
+    ("QR / Validación en acceso", r"\bqr\b|validaci[oó]n|validad(or|ores)|escane"),
+    ("Pagos / cobros", r"\bpago(s)?\b|cobro|rechazad|tarjeta|mercadopago|\bmp\b|cuotas"),
+    ("Reembolso / devolución", r"reembols|devoluci[oó]n|refund|chargeback"),
+    ("Cuenta / login / registro", r"cuenta|login|logue|registr|contrase[nñ]a|clave|verificaci[oó]n\s*de\s*mail|correo\s*inv[aá]lido"),
+    ("App / rendimiento / bug", r"\bapp\b|aplicaci[oó]n|crash|no\s*funciona|bug|error\s*(t[eé]cnico|500|404)"),
+    ("Soporte / sin respuesta / SDU", r"sin\s*respuesta|\bsdu\b|jotform|demora|espera"),
+    ("Información de evento", r"consulta\s*por\s*evento|horario|ubicaci[oó]n|vip|mapa|line\s*up|ingreso|puerta"),
+    ("Productores / RRPP / invitaciones", r"invitaci[oó]n|\brrpp\b|productor|productora|validadores|operativo"),
+]
+
+def choose_issue(motivo_final, submotivo_final, texto_base):
+    m = _safe_str(motivo_final).strip()
+    if m in ISSUE_MAP:
+        return ISSUE_MAP[m]
+
+    sm = _safe_str(submotivo_final).strip().lower()
+    if "qr" in sm:
+        return "QR / Validación en acceso"
+    if "pago" in sm or "mp" in sm:
+        return "Pagos / cobros"
+
+    t = _norm_txt(_safe_str(texto_base))
+    for label, rx in ISSUE_REGEX_RULES:
+        if re.search(rx, t):
+            return label
+    return ISSUE_MAP["_default"]
+
 # ===================== Heurísticas de Issues =====================
 
 RULES = [
@@ -245,7 +334,7 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
     ttr_secs = ttr_secs.where(~need_ttr, est_ttr)
     ttr_secs = ttr_secs.where(ttr_secs >= 0, np.nan)
 
-    # Tickets resueltos
+    # Tickets resueltos (fallback por status, se refuerza luego con estado_final)
     if "status" in df.columns:
         tickets = int((df["status"].astype(str).str.lower() == "closed").sum()) or int(len(df))
     else:
@@ -423,7 +512,6 @@ class _AIBudget:
         return True
 
 def _dataset_fingerprint(df: pd.DataFrame) -> str:
-    # Fingerprint compacto del contenido relevante
     h = hashlib.sha256()
     h.update(str(len(df)).encode())
     counts = df["issue_group"].value_counts().to_dict() if "issue_group" in df.columns else {}
@@ -825,6 +913,8 @@ def notion_create_page(parent_page_id: str,
     blocks.append(_para(f"📂 Fuente de datos: {meta.get('fuente','')}"))
     blocks.append(_para(f"💬 Conversaciones procesadas: {meta.get('total','')}"))
     blocks.append(_para("Durante el periodo analizado se registraron conversaciones en Intercom, procesadas por IA para identificar patrones, problemas recurrentes y oportunidades de mejora."))
+    # Foco ejecutivo (nuevo)
+    blocks.append(_callout("Foco de la semana: reducir TTR p50 en Top-2 issues (-20% en 14 días) y +0.2 CSAT.", icon="🎯"))
 
     # KPIs
     blocks.extend(build_kpi_section_blocks(kpis, total_items=len(df)))
@@ -842,7 +932,7 @@ def notion_create_page(parent_page_id: str,
     if insights.get("top_issues"):
         blocks.append(_callout(insights["top_issues"], icon="💡"))
 
-    # Gráficos + insights (robusto ante URLs/insights faltantes)
+    # Gráficos + insights
     for key, caption in [
         ("top_issues", "Top Issues"),
         ("urgencia_pie", "Distribución de Urgencias"),
@@ -977,15 +1067,40 @@ def run(csv_path: str,
             df[col] = df[col].astype(object)
     df = enforce_taxonomy(df)
 
+    # ---------------- NUEVO: consolidar csat / estado_final / issue estable ----------------
+    df["csat_num"] = df.apply(pick_csats, axis=1)
+    if "csat" in df.columns:
+        df["csat"] = df["csat"].where(pd.to_numeric(df["csat"], errors="coerce").between(1,5), df["csat_num"])
+    else:
+        df["csat"] = df["csat_num"]
+
+    df["estado_final"] = df.apply(estado_final_from, axis=1)
+
+    if "texto_base" not in df.columns:
+        df["texto_base"] = df.apply(build_text_base, axis=1)
+        
+    for c in ["motivo_norm", "submotivo_norm", "texto_base"]:
+        if c in df.columns:
+            df[c] = df[c].astype(object).where(~pd.isna(df[c]), "")
+
+    df["issue_group"] = df.apply(
+        lambda r: choose_issue(r.get("motivo_norm"), r.get("submotivo_norm"), r.get("texto_base")),
+        axis=1
+    )
+    # -------------------------------------------------------------------
+
     # Prueba rápida de Gemini
     _gemini_smoke_test(gemini_api_key, gemini_model)
 
     # KPI desde crudos
     kpis = compute_kpis_from_raw_df(df, sla_minutes=sla_first_reply_min)
 
-    # Issue grouping
-    df["texto_base"] = df.apply(build_text_base, axis=1)
-    df["issue_group"] = df["texto_base"].apply(assign_issue_group)
+    # Reforzar "tickets resueltos" por estado_final
+    if "estado_final" in df.columns:
+        kpis["tickets_resueltos"] = int((df["estado_final"] == "Resuelto").sum())
+
+    # Issue grouping (mantengo el original por si lo usabas para contrastar)
+    # df["issue_group"] ya set por choose_issue()
 
     # Flags
     flags = df.apply(compute_flags, axis=1)
@@ -1017,10 +1132,10 @@ def run(csv_path: str,
     casos_csv = os.path.join(out_dir, "casos_con_issue.csv")
     df_export_cols = ["fecha","canal","rol","area","tema_norm","motivo_norm","submotivo_norm",
                       "categoria","urgencia","sentimiento","resumen_ia","insight_ia",
-                      "palabras_clave","issue_group","risk","sla_now","taxonomy_flag",
+                      "palabras_clave","issue_group","estado_final","risk","sla_now","taxonomy_flag",
                       "link_a_intercom","id_intercom",
                       "created_at","first_admin_reply_at","first_contact_reply_at","closed_at",
-                      "first_response_seconds","ttr_seconds","status","csat"]
+                      "first_response_seconds","ttr_seconds","status","csat","csat_num"]
     existing = [c for c in df_export_cols if c in df.columns]
     df[existing].to_csv(casos_csv, index=False, encoding="utf-8")
     resumen_df.to_csv(issues_csv, index=False, encoding="utf-8")
@@ -1090,7 +1205,6 @@ def run(csv_path: str,
         acciones_ai = cached.get("acciones_ai", {})
         print(f"♻️ Reutilizando insights desde cache. insights={len(insights)} | acciones={len(acciones_ai)}")
     elif budget > 0 and (gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
-        # Helper para gastar "fichas" de IA
         def try_insight(name, obj):
             nonlocal insights
             if not ai.take():
@@ -1102,7 +1216,6 @@ def run(csv_path: str,
             if txt:
                 insights[name] = txt
 
-        # Insights de gráficos (orden de valor)
         try_insight("top_issues", top_counts.to_dict())
         try_insight("urgencia_pie", urg_counts.to_dict())
         try_insight("sentimiento_pie", sent_counts.to_dict())
@@ -1113,7 +1226,6 @@ def run(csv_path: str,
         if not ai.rate_limited:
             try_insight("urgencia_top_issues", urg_top_ct)
 
-        # Insights de Tema/Motivo
         if not ai.rate_limited and (mode == "full" or ai.budget >= 2):
             tema_counts = df["tema_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
             tema_counts = tema_counts[tema_counts != ""].value_counts().head(5)
@@ -1133,7 +1245,6 @@ def run(csv_path: str,
                 elif mtxt == "__RATE_LIMIT__":
                     ai.rate_limited = True
 
-        # Acciones por issue
         max_actions = 5 if mode == "full" else 2 if mode == "lite" else 0
         for _, row in resumen_df.head(max_actions).iterrows():
             if ai.rate_limited or not ai.take():
@@ -1154,12 +1265,10 @@ def run(csv_path: str,
             if add:
                 acciones_ai[issue] = add
 
-        # Guardar cache si logramos algo
         if insights or acciones_ai:
             cache[fp] = {"insights": insights, "acciones_ai": acciones_ai}
             _save_ai_cache(cache_path, cache)
 
-    # ---- Resumen de uso de IA (used) ----
     used = budget - ai.budget
     print(f"🤖 IA → modo={mode} | usadas={used}/{budget} | rate_limited={ai.rate_limited} | insights={len(insights)} | acciones={len(acciones_ai)}")
 
