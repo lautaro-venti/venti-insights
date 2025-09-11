@@ -4,6 +4,8 @@ Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
 - KPIs debajo de Resumen Ejecutivo (tarjetas + bullets)
 - IA con modos (full/lite/off), presupuesto y cache para evitar 429
 - Sanitizado de links y tablas nativas Notion
+- Quality gate para resumen/insight + heurísticas anti "trío vago"
+- Heurística de "silencio => probablemente resuelto"
 """
 
 import os
@@ -25,16 +27,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# ===================== Config heurística =====================
+SILENCE_MINUTES_ASSUME_RESUELTO = 60  # si no responde el contacto tras far en X min y hubo acción => Resuelto
+
 # ===================== Utilidades base =====================
 
 EMOJI_RX = re.compile(r"[\U00010000-\U0010FFFF]", flags=re.UNICODE)
 
 def _safe_str(v: object) -> str:
     try:
-        if v is None: 
+        if v is None:
             return ""
-        # pandas NaN
-        if isinstance(v, float) and pd.isna(v):
+        if isinstance(v, float) and pd.isna(v):  # pandas NaN
             return ""
         s = str(v)
         if s.lower() == "nan":
@@ -308,6 +312,103 @@ def compute_flags(row: pd.Series) -> pd.Series:
         risk = "MEDIUM"
     sla_now = (canal in ("whatsapp","instagram")) and (risk == "HIGH")
     return pd.Series({"risk": risk, "sla_now": sla_now})
+
+# ===================== Quality Gate resumen/insight + Anti "trío vago" =====================
+
+def _is_vague_summary(s: str) -> bool:
+    ss = (_norm_txt(s) or "")
+    return (not ss) or ("caso sin resumen explicito" in ss) or (len(ss) < 30)
+
+def _is_vague_insight(s: str) -> bool:
+    ss = (_norm_txt(s) or "")
+    return (not ss) or ("registrar el caso y monitorear patrones" in ss) or (len(ss) < 30)
+
+def _enrich_summary(row) -> str:
+    canal = _safe_str(row.get("canal") or "-")
+    rol   = _safe_str(row.get("rol") or "-")
+    tema  = _safe_str(row.get("tema_norm") or row.get("tema") or "")
+    mot   = _safe_str(row.get("motivo_norm") or row.get("motivo") or "")
+    sub   = _safe_str(row.get("submotivo_norm") or row.get("submotivo") or "")
+    estado= _safe_str(row.get("estado_final") or "")
+    tbase = _norm_txt(row.get("texto_base",""))
+    # Acción deducida simple
+    action = "seguimiento"
+    if any(w in tbase for w in ["se envio","reenvio","informamos","adjuntamos","validacion","corregido","listo"]):
+        action = "info enviada"
+    pedido = "qué pidió o reportó el usuario"
+    if "correo invalido" in tbase or "registro" in tbase:
+        pedido = "problema para crear cuenta/validar email"
+    elif "no recibi mi entrada" in tbase or "entrada no" in tbase:
+        pedido = "no recibió su entrada y pide reenvío"
+    causa = ""
+    if "rechazad" in tbase:
+        causa = "posible pago rechazado"
+    elif "qr" in tbase:
+        causa = "problema de validación QR"
+    base = f"{canal}/{rol}: {pedido}"
+    if mot or sub or tema:
+        base += f"; motivo {mot or tema}{' / ' + sub if sub else ''}"
+    if causa:
+        base += f"; causa probable: {causa}"
+    if estado:
+        base += f"; ESTADO FINAL {estado}"
+    base += f"; acción: {action}."
+    return base
+
+def _enrich_insight(row) -> str:
+    issue = _safe_str(row.get("issue_group") or "Caso")
+    sent = _safe_lower(row.get("sentimiento", ""))
+    urg  = _safe_lower(row.get("urgencia", ""))
+
+    sent = _safe_lower(row.get("sentimiento", ""))
+    urg  = _safe_lower(row.get("urgencia", ""))
+    kpi  = "CSAT" if sent == "negativo" else "TTR"
+    prio = "Alta" if urg == "alta" else "Media"
+
+    recs  = {
+        "QR / Validación en acceso": "Ingeniería: health-checks y telemetría de validadores | CX: guía de acceso",
+        "Pagos / cobros": "Producto: mostrar causa de rechazo | Tech: retries PSP | CX: macro paso a paso",
+        "Entrega de entradas": "Producto: CTA reenvío visible | Tech: job idempotente | CX: bot reenvío",
+    }
+    extra = recs.get(issue, "Producto: quick wins de UX | Tech: logging/tracing | CX: macro específica")
+    return f"{issue}: priorizar fixes. {extra} — Prioridad: {prio}; Métrica: {kpi}; Tiempo: 2–3 semanas."
+
+def _sent_rule(text: str) -> str:
+    t = _norm_txt(text)
+    if any(w in t for w in ["queja","estafa","fraude","no puedo","rechazad","error","fallo","no funciona"]): return "Negativo"
+    if any(w in t for w in ["gracias","excelente","solucionado","todo ok","genial"]): return "Positivo"
+    return "Neutro"
+
+def _urg_rule(text: str) -> str:
+    t = _norm_txt(text)
+    if any(w in t for w in ["hoy","ya","urgente","evento","no puedo ingresar","no puedo entrar","qr","validador","no recibi mi entrada"]): return "Alta"
+    if any(w in t for w in ["consulta","informacion","como hago","quiero saber"]): return "Baja"
+    return "Media"
+
+def _csat_rule(sent:str, estado:str) -> int:
+    s = (sent or "").lower(); e = (estado or "").lower()
+    if e == "no resuelto" or s == "negativo": return 1 if e == "no resuelto" else 2
+    if e == "resuelto": return 4 if s != "negativo" else 3
+    if e == "pendiente": return 2 if s == "negativo" else 3
+    return 3
+
+def _assume_resuelto_por_silencio(row) -> str:
+    estado = _safe_str(row.get("estado_final",""))
+    if estado in ("Resuelto","No resuelto","Sin respuesta"):
+        return estado
+    try:
+        far = float(row.get("first_admin_reply_at", "nan"))
+        fcr = float(row.get("first_contact_reply_at", "nan"))
+    except Exception:
+        return estado or "Pendiente"
+    if np.isnan(far):
+        return estado or "Pendiente"
+    # sin respuesta del contacto o respuesta muy tardía
+    if np.isnan(fcr) or (fcr - far) > (SILENCE_MINUTES_ASSUME_RESUELTO * 60):
+        # buscamos señales de acción ejecutada por el equipo
+        if any(w in _norm_txt(row.get("resumen_qc","")) for w in ["reenvio","validacion","corregido","listo","informamos","enviado"]):
+            return "Resuelto"
+    return estado or "Pendiente"
 
 # ===================== KPI desde campos crudos =====================
 
@@ -922,6 +1023,17 @@ def notion_create_page(parent_page_id: str,
     # KPIs
     blocks.extend(build_kpi_section_blocks(kpis, total_items=len(df)))
 
+    # Métricas de calidad de IA / heurísticas (si están disponibles en meta)
+    triovago_rate = meta.get("triovago_rate", None)
+    qc_sum = meta.get("qc_summary_generic", None)
+    qc_ins = meta.get("qc_insight_generic", None)
+    if triovago_rate is not None or qc_sum is not None or qc_ins is not None:
+        blocks.append(_divider())
+        if triovago_rate is not None:
+            blocks.append(_bullet(f"Corrección 'trío vago' aplicada en {triovago_rate}% de los casos."))
+        if qc_sum is not None or qc_ins is not None:
+            blocks.append(_bullet(f"Resúmenes enriquecidos: {qc_sum}% • Insights enriquecidos: {qc_ins}%"))
+
     # Top 3 issues
     blocks.append(_h2("Top 3 issues"))
     total_len = max(len(df), 1)
@@ -1077,11 +1189,14 @@ def run(csv_path: str,
     else:
         df["csat"] = df["csat_num"]
 
-    df["estado_final"] = df.apply(estado_final_from, axis=1)
-
+    # Texto base para heurísticas posteriores
     if "texto_base" not in df.columns:
         df["texto_base"] = df.apply(build_text_base, axis=1)
-        
+    else:
+        df["texto_base"] = df["texto_base"].fillna("")
+
+    df["estado_final"] = df.apply(estado_final_from, axis=1)
+
     for c in ["motivo_norm", "submotivo_norm", "texto_base"]:
         if c in df.columns:
             df[c] = df[c].astype(object).where(~pd.isna(df[c]), "")
@@ -1090,7 +1205,26 @@ def run(csv_path: str,
         lambda r: choose_issue(r.get("motivo_norm"), r.get("submotivo_norm"), r.get("texto_base")),
         axis=1
     )
-    # -------------------------------------------------------------------
+
+    # QUALITY GATE: resumen/insight curados
+    df["resumen_qc"] = df.apply(lambda r: r["resumen_ia"] if not _is_vague_summary(r.get("resumen_ia","")) else _enrich_summary(r), axis=1)
+    df["insight_qc"] = df.apply(lambda r: r["insight_ia"] if not _is_vague_insight(r.get("insight_ia","")) else _enrich_insight(r), axis=1)
+
+    # Anti "trío vago" (sólo cuando aplica)
+    mask_trio = (df["sentimiento"].astype(str).str.lower().eq("neutro")) & \
+                (df["urgencia"].astype(str).str.lower().eq("media")) & \
+                (df["csat"].astype(str).eq("3"))
+    df.loc[mask_trio, "sentimiento"] = df.loc[mask_trio, "texto_base"].map(_sent_rule)
+    df.loc[mask_trio, "urgencia"]    = df.loc[mask_trio, "texto_base"].map(_urg_rule)
+    df.loc[mask_trio, "csat"]        = df.loc[mask_trio].apply(lambda r: _csat_rule(r["sentimiento"], r["estado_final"]), axis=1)
+    triovago_rate = round(100 * mask_trio.mean(), 1)
+
+    # Heurística de silencio => resuelto (se aplica tras enriquecer resumen)
+    df["estado_final"] = df.apply(_assume_resuelto_por_silencio, axis=1)
+
+    # Métricas de calidad (qué % tuvimos que enriquecer)
+    qc_summary_generic = round(100 * (df["resumen_qc"] != df.get("resumen_ia","")).mean(), 1) if "resumen_ia" in df.columns else 0.0
+    qc_insight_generic = round(100 * (df["insight_qc"] != df.get("insight_ia","")).mean(), 1) if "insight_ia" in df.columns else 0.0
 
     # Prueba rápida de Gemini
     _gemini_smoke_test(gemini_api_key, gemini_model)
@@ -1101,9 +1235,6 @@ def run(csv_path: str,
     # Reforzar "tickets resueltos" por estado_final
     if "estado_final" in df.columns:
         kpis["tickets_resueltos"] = int((df["estado_final"] == "Resuelto").sum())
-
-    # Issue grouping (mantengo el original por si lo usabas para contrastar)
-    # df["issue_group"] ya set por choose_issue()
 
     # Flags
     flags = df.apply(compute_flags, axis=1)
@@ -1134,7 +1265,7 @@ def run(csv_path: str,
     issues_csv = os.path.join(out_dir, "issues_resumen.csv")
     casos_csv = os.path.join(out_dir, "casos_con_issue.csv")
     df_export_cols = ["fecha","canal","rol","area","tema_norm","motivo_norm","submotivo_norm",
-                      "categoria","urgencia","sentimiento","resumen_ia","insight_ia",
+                      "categoria","urgencia","sentimiento","resumen_ia","insight_ia","resumen_qc","insight_qc",
                       "palabras_clave","issue_group","estado_final","risk","sla_now","taxonomy_flag",
                       "link_a_intercom","id_intercom",
                       "created_at","first_admin_reply_at","first_contact_reply_at","closed_at",
@@ -1278,7 +1409,14 @@ def run(csv_path: str,
     # Notion
     if notion_token and notion_parent:
         page_title = f"Reporte CX – {date.today().isoformat()}"
-        meta = {"fecha": date.today().isoformat(), "fuente": os.path.basename(csv_path), "total": total}
+        meta = {
+            "fecha": date.today().isoformat(),
+            "fuente": os.path.basename(csv_path),
+            "total": total,
+            "triovago_rate": triovago_rate,
+            "qc_summary_generic": qc_summary_generic,
+            "qc_insight_generic": qc_insight_generic
+        }
         page = notion_create_page(
             parent_page_id=notion_parent,
             token=notion_token,
@@ -1305,7 +1443,10 @@ def run(csv_path: str,
                 "canal_por_issue": p_canal_issue,
                 "urgencia_top_issues": p_urg_top
             },
-            "insights": insights
+            "insights": insights,
+            "triovago_rate": triovago_rate,
+            "qc_summary_generic_%": qc_summary_generic,
+            "qc_insight_generic_%": qc_insight_generic
         }, indent=2, ensure_ascii=False))
 
 # ===================== CLI =====================
