@@ -9,6 +9,7 @@ Fixes clave en esta versión:
 - Removido bloque público de "trío vago / QC" (solo métricas internas por print).
 - Pie de Urgencias: oculta 0% y evita superposiciones (autopct que esconde porcentajes <1%).
 - Top 3 issues (bullets) y gráfico usan la MISMA serie de conteos para que coincidan.
+- Anti-caché: querystring único en imágenes Notion + Top Issues con nombre versionado por fingerprint.
 """
 
 import os
@@ -759,7 +760,7 @@ def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None,
         "Devuelve SOLO JSON válido con claves 'Producto','Tech','CX'."
     )
     txt = gemini_generate_text(prompt, api_key=api_key, model=model, max_output_tokens=320)
-    if txt == "__RATE_LIMIT__":  # sin ruido en reportes
+    if txt == "__RATE_LIMIT__":
         return {"__rate_limited__": True}
     try:
         obj = json.loads(txt)
@@ -1103,8 +1104,6 @@ def notion_create_page(parent_page_id: str,
     # Top 3 issues (usa la MISMA serie que el gráfico)
     blocks.append(_divider())
     blocks.append(_h2("Top 3 issues"))
-    total_len = max(len(df), 1)
-    series = (top_counts_series if top_counts_series is not None else df["issue_group"].value_counts())
     top3_rows = resumen_df.sort_values("casos", ascending=False).head(3)
     if len(top3_rows) == 0:
         blocks.append(_para("—"))
@@ -1246,7 +1245,7 @@ def _fallback_insights(insights: dict,
             insights["sentimiento_pie"] = f"El {round(100*neg/tot)}% de los tickets reflejan sentimiento negativo. Revisar comunicación y tiempos."
 
     if "ttr_por_urgencia_box" not in insights and ttr_urg_stats:
-        def fmt(h): 
+        def fmt(h):
             return f"{h:.1f} h" if isinstance(h, (int,float)) else "—"
         p50_alt = ttr_urg_stats.get("Alta",{}).get("p50")
         p50_med = ttr_urg_stats.get("Media",{}).get("p50")
@@ -1351,6 +1350,9 @@ def run(csv_path: str,
     resumen_df = pd.DataFrame(rows).sort_values("casos", ascending=False)
     resumen_df = compare_with_prev(resumen_df, hist_dir=os.path.join(out_dir, "hist"))
 
+    # ---------- Fingerprint (para nombres y cache-busting) ----------
+    fp = _dataset_fingerprint(df)
+
     # Exports CSV
     issues_csv = os.path.join(out_dir, "issues_resumen.csv")
     casos_csv = os.path.join(out_dir, "casos_con_issue.csv")
@@ -1366,8 +1368,10 @@ def run(csv_path: str,
 
     total = len(df)
 
-    # Gráficos
-    p_top,   all_counts = chart_top_issues(df, out_dir)   # serie completa
+    # Gráficos (Top Issues desde resumen_df + nombre con fingerprint)
+    p_top,   top_counts = chart_top_issues(resumen_df, out_dir, filename=f"top_issues_{fp}.png")
+    print("DEBUG Top Issues usados →", top_counts.to_dict(), "| PNG:", os.path.basename(p_top))
+
     p_urg_pie, urg_counts = chart_urgencia_pie(df, out_dir)
     p_sent_pie, sent_counts = chart_sentimiento_pie(df, out_dir)
     p_urg_issue, urg_issue_ct = chart_urgencia_por_issue(df, out_dir)
@@ -1397,16 +1401,18 @@ def run(csv_path: str,
         except Exception as e:
             print(f"⚠️ No pude publicar en GitHub: {e}")
 
+    # Cache-busting para URLs (Notion considera la URL distinta)
     chart_urls = {}
     if assets_base_url:
+        cache_bust = f"?v={fp}-{int(time.time())}"
         chart_urls = {
-            "top_issues": f"{assets_base_url}/{os.path.basename(p_top)}",
-            "urgencia_pie": f"{assets_base_url}/{os.path.basename(p_urg_pie)}",
-            "sentimiento_pie": f"{assets_base_url}/{os.path.basename(p_sent_pie)}",
-            "urgencia_por_issue": f"{assets_base_url}/{os.path.basename(p_urg_issue)}",
-            "canal_por_issue": f"{assets_base_url}/{os.path.basename(p_canal_issue)}",
-            "urgencia_top_issues": f"{assets_base_url}/{os.path.basename(p_urg_top)}",
-            "ttr_por_urgencia_box": f"{assets_base_url}/{os.path.basename(p_ttr_urg)}",
+            "top_issues": f"{assets_base_url}/{os.path.basename(p_top)}{cache_bust}",
+            "urgencia_pie": f"{assets_base_url}/{os.path.basename(p_urg_pie)}{cache_bust}",
+            "sentimiento_pie": f"{assets_base_url}/{os.path.basename(p_sent_pie)}{cache_bust}",
+            "urgencia_por_issue": f"{assets_base_url}/{os.path.basename(p_urg_issue)}{cache_bust}",
+            "canal_por_issue": f"{assets_base_url}/{os.path.basename(p_canal_issue)}{cache_bust}",
+            "urgencia_top_issues": f"{assets_base_url}/{os.path.basename(p_urg_top)}{cache_bust}",
+            "ttr_por_urgencia_box": f"{assets_base_url}/{os.path.basename(p_ttr_urg)}{cache_bust}",
         }
 
     # ===== IA: modos, presupuesto y cache =====
@@ -1421,7 +1427,6 @@ def run(csv_path: str,
     ai = _AIBudget(budget)
     cache_path = os.path.join(out_dir, "hist", "ai_cache.json")
     cache = _load_ai_cache(cache_path)
-    fp = _dataset_fingerprint(df)
 
     insights = {}
     acciones_ai = {}
@@ -1443,7 +1448,7 @@ def run(csv_path: str,
             if txt:
                 insights[name] = txt
 
-        try_insight("top_issues", all_counts.to_dict())
+        try_insight("top_issues", top_counts.to_dict())
         try_insight("urgencia_pie", urg_counts.to_dict())
         try_insight("sentimiento_pie", sent_counts.to_dict())
         if not ai.rate_limited:
@@ -1481,7 +1486,7 @@ def run(csv_path: str,
             _save_ai_cache(cache_path, cache)
 
     # Fallbacks determinísticos (garantiza foquito en TTR por urgencia)
-    insights = _fallback_insights(insights, all_counts, urg_counts, sent_counts, ttr_urg_stats)
+    insights = _fallback_insights(insights, top_counts, urg_counts, sent_counts, ttr_urg_stats)
 
     used = budget - ai.budget
     print(f"🤖 IA → modo={mode} | usadas={used}/{budget} | rate_limited={ai.rate_limited} | insights={len(insights)} | acciones={len(acciones_ai)}")
@@ -1507,7 +1512,7 @@ def run(csv_path: str,
             insights=insights,
             acciones_ai=acciones_ai if acciones_ai else None,
             kpis=kpis,
-            top_counts_series=all_counts
+            top_counts_series=top_counts
         )
         print(f"✅ Publicado en Notion: {page.get('url','(sin url)')}")
     else:
