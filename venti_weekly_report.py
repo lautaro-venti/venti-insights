@@ -6,6 +6,7 @@ Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
 - Sanitizado de links y tablas nativas Notion
 - Quality gate para resumen/insight + heurísticas anti "trío vago"
 - Heurística de "silencio => probablemente resuelto"
+- NUEVO: gráfico TTR por Urgencia (boxplot + stats) + mejoras visuales matplotlib
 """
 
 import os
@@ -250,13 +251,11 @@ def choose_issue(motivo_final, submotivo_final, texto_base):
     m = _safe_str(motivo_final).strip()
     if m in ISSUE_MAP:
         return ISSUE_MAP[m]
-
     sm = _safe_str(submotivo_final).strip().lower()
     if "qr" in sm:
         return "QR / Validación en acceso"
     if "pago" in sm or "mp" in sm:
         return "Pagos / cobros"
-
     t = _norm_txt(_safe_str(texto_base))
     for label, rx in ISSUE_REGEX_RULES:
         if re.search(rx, t):
@@ -359,12 +358,8 @@ def _enrich_insight(row) -> str:
     issue = _safe_str(row.get("issue_group") or "Caso")
     sent = _safe_lower(row.get("sentimiento", ""))
     urg  = _safe_lower(row.get("urgencia", ""))
-
-    sent = _safe_lower(row.get("sentimiento", ""))
-    urg  = _safe_lower(row.get("urgencia", ""))
     kpi  = "CSAT" if sent == "negativo" else "TTR"
     prio = "Alta" if urg == "alta" else "Media"
-
     recs  = {
         "QR / Validación en acceso": "Ingeniería: health-checks y telemetría de validadores | CX: guía de acceso",
         "Pagos / cobros": "Producto: mostrar causa de rechazo | Tech: retries PSP | CX: macro paso a paso",
@@ -405,7 +400,6 @@ def _assume_resuelto_por_silencio(row) -> str:
         return estado or "Pendiente"
     # sin respuesta del contacto o respuesta muy tardía
     if np.isnan(fcr) or (fcr - far) > (SILENCE_MINUTES_ASSUME_RESUELTO * 60):
-        # buscamos señales de acción ejecutada por el equipo
         if any(w in _norm_txt(row.get("resumen_qc","")) for w in ["reenvio","validacion","corregido","listo","informamos","enviado"]):
             return "Resuelto"
     return estado or "Pendiente"
@@ -486,7 +480,21 @@ def _fmt_h(h):
     if h is None: return "—"
     return f"{h:.2f} h"
 
-# ===================== Gráficos =====================
+# ===================== Gráficos (mejoras visuales) =====================
+
+def _format_ax(ax, xgrid=False, ygrid=True):
+    ax.grid(axis="y" if ygrid else "x", linestyle="--", alpha=0.3)
+
+def _bar_labels(ax, is_horizontal=False):
+    for p in ax.patches:
+        if is_horizontal:
+            w = p.get_width()
+            y = p.get_y() + p.get_height()/2
+            ax.text(w + max(0.5, 0.01*ax.get_xlim()[1]), y, f"{int(w)}", va="center", fontsize=8)
+        else:
+            h = p.get_height()
+            x = p.get_x() + p.get_width()/2
+            ax.text(x, h + max(0.5, 0.01*ax.get_ylim()[1]), f"{int(h)}", ha="center", va="bottom", fontsize=8)
 
 def chart_top_issues(df, out_dir):
     counts = df["issue_group"].value_counts().head(5)
@@ -498,6 +506,7 @@ def chart_top_issues(df, out_dir):
     ax.set_yticks(y); ax.set_yticklabels(labels)
     ax.set_title("Top Issues"); ax.set_xlabel("Casos")
     ax.invert_yaxis()
+    _format_ax(ax); _bar_labels(ax, is_horizontal=True)
     p = os.path.join(out_dir, "top_issues.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, counts
@@ -509,6 +518,7 @@ def chart_urgencia_pie(df, out_dir):
     if len(vals) == 0:
         vals = [1]; labels = ["Sin datos"]
     ax.pie(vals, labels=labels, autopct="%1.0f%%", startangle=90)
+    ax.axis("equal")
     ax.set_title("Distribución de Urgencias")
     p = os.path.join(out_dir, "urgencia_pie.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
@@ -521,6 +531,7 @@ def chart_sentimiento_pie(df, out_dir):
     if len(vals) == 0:
         vals = [1]; labels = ["Sin datos"]
     ax.pie(vals, labels=labels, autopct="%1.0f%%", startangle=90)
+    ax.axis("equal")
     ax.set_title("Distribución de Sentimientos")
     p = os.path.join(out_dir, "sentimiento_pie.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
@@ -535,8 +546,10 @@ def chart_urgencia_por_issue(df, out_dir):
         vals = ct[col].values
         ax.bar(x, vals, bottom=bottom, label=str(col))
         bottom = bottom + vals
-    ax.set_xticks(x); ax.set_xticklabels(list(ct.index), rotation=45, ha="right")
-    ax.set_title("Urgencia por Issue"); ax.set_ylabel("Casos"); ax.legend()
+    ax.set_xticks(x); ax.set_xticklabels(list(ct.index), rotation=30, ha="right")
+    ax.set_title("Urgencia por Issue"); ax.set_ylabel("Casos")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.0,1.0), fontsize=8)
+    _format_ax(ax)
     p = os.path.join(out_dir, "urgencia_por_issue.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, ct
@@ -550,8 +563,10 @@ def chart_canal_por_issue(df, out_dir):
         vals = ct[col].values
         ax.bar(x, vals, bottom=bottom, label=str(col))
         bottom = bottom + vals
-    ax.set_xticks(x); ax.set_xticklabels(list(ct.index), rotation=45, ha="right")
-    ax.set_title("Canal por Issue"); ax.set_ylabel("Casos"); ax.legend(ncols=2, fontsize=8)
+    ax.set_xticks(x); ax.set_xticklabels(list(ct.index), rotation=30, ha="right")
+    ax.set_title("Canal por Issue"); ax.set_ylabel("Casos")
+    ax.legend(ncols=2, fontsize=8, loc="upper left", bbox_to_anchor=(1.0,1.0))
+    _format_ax(ax)
     p = os.path.join(out_dir, "canal_por_issue.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, ct
@@ -569,11 +584,56 @@ def chart_urgencias_en_top_issues(df, out_dir, top_n=5):
     for i, urg in enumerate(urg_levels):
         vals = ct[urg].values if urg in ct.columns else np.zeros(len(ct.index))
         ax.bar(idx + (i-1)*width, vals, width=width, label=urg)
-    ax.set_xticks(idx); ax.set_xticklabels(list(ct.index), rotation=45, ha="right")
+    ax.set_xticks(idx); ax.set_xticklabels(list(ct.index), rotation=30, ha="right")
     ax.set_title("Distribución de Urgencias en Top Issues"); ax.set_ylabel("Casos"); ax.legend()
+    _format_ax(ax)
     p = os.path.join(out_dir, "urgencia_top_issues.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
     return p, ct
+
+# -------- NUEVO: TTR por Urgencia (boxplot + stats) --------
+
+def _urg_norm(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.strip().str.title()
+    return s.replace({"High":"Alta","Medium":"Media","Low":"Baja"})
+
+def ttr_stats_by_urgencia(df: pd.DataFrame) -> pd.DataFrame:
+    ttr = pd.to_numeric(df.get("ttr_seconds", np.nan), errors="coerce")/3600.0
+    urg = _urg_norm(df.get("urgencia", pd.Series(["Sin dato"]*len(df))))
+    ok = pd.DataFrame({"ttr_h": ttr, "urgencia": urg}).dropna()
+    if ok.empty:
+        return pd.DataFrame(columns=["urgencia","n","p50_h","p90_h","mean_h"])
+    def agg(g):
+        vals = g["ttr_h"].values
+        return pd.Series({
+            "n": len(vals),
+            "p50_h": float(np.nanpercentile(vals,50)),
+            "p90_h": float(np.nanpercentile(vals,90)),
+            "mean_h": float(np.nanmean(vals))
+        })
+    out = ok.groupby("urgencia").apply(agg).reset_index()
+    order = ["Alta","Media","Baja"]
+    out["urgencia"] = pd.Categorical(out["urgencia"], categories=order, ordered=True)
+    return out.sort_values("urgencia")
+
+def chart_ttr_por_urgencia(df, out_dir):
+    # Boxplot
+    ttr = pd.to_numeric(df.get("ttr_seconds", np.nan), errors="coerce")/3600.0
+    urg = _urg_norm(df.get("urgencia", pd.Series(["Sin dato"]*len(df))))
+    ok = pd.DataFrame({"ttr_h": ttr, "urgencia": urg}).dropna()
+    order = ["Alta","Media","Baja"]
+    data = [ok.loc[ok["urgencia"]==u, "ttr_h"].values for u in order]
+    fig, ax = plt.subplots(figsize=(8,5))
+    ax.boxplot(data, labels=order, showfliers=False)
+    ax.set_title("TTR por Urgencia (horas)")
+    ax.set_ylabel("Horas")
+    _format_ax(ax)
+    p = os.path.join(out_dir, "ttr_por_urgencia.png")
+    plt.tight_layout(); fig.savefig(p); plt.close(fig)
+
+    # Stats (para insight o tabla si se quisiera)
+    stats = ttr_stats_by_urgencia(df)
+    return p, stats
 
 # ===================== Comparativa WoW =====================
 
@@ -758,7 +818,8 @@ def publish_images_to_github(out_dir: str,
                              files: list[str] | None = None) -> str:
     if files is None:
         files = ["top_issues.png", "urgencia_pie.png", "sentimiento_pie.png",
-                 "urgencia_por_issue.png", "canal_por_issue.png", "urgencia_top_issues.png"]
+                 "urgencia_por_issue.png", "canal_por_issue.png", "urgencia_top_issues.png",
+                 "ttr_por_urgencia.png"]  # NUEVO
     if date_subdir is None:
         date_subdir = date.today().isoformat()
 
@@ -1017,13 +1078,12 @@ def notion_create_page(parent_page_id: str,
     blocks.append(_para(f"📂 Fuente de datos: {meta.get('fuente','')}"))
     blocks.append(_para(f"💬 Conversaciones procesadas: {meta.get('total','')}"))
     blocks.append(_para("Durante el periodo analizado se registraron conversaciones en Intercom, procesadas por IA para identificar patrones, problemas recurrentes y oportunidades de mejora."))
-    # Foco ejecutivo (nuevo)
     blocks.append(_callout("Foco de la semana: reducir TTR p50 en Top-2 issues (-20% en 14 días) y +0.2 CSAT.", icon="🎯"))
 
     # KPIs
     blocks.extend(build_kpi_section_blocks(kpis, total_items=len(df)))
 
-    # Métricas de calidad de IA / heurísticas (si están disponibles en meta)
+    # Métricas de calidad IA
     triovago_rate = meta.get("triovago_rate", None)
     qc_sum = meta.get("qc_summary_generic", None)
     qc_ins = meta.get("qc_insight_generic", None)
@@ -1047,7 +1107,7 @@ def notion_create_page(parent_page_id: str,
     if insights.get("top_issues"):
         blocks.append(_callout(insights["top_issues"], icon="💡"))
 
-    # Gráficos + insights
+    # Gráficos + insights (incluye NUEVO TTR por Urgencia)
     for key, caption in [
         ("top_issues", "Top Issues"),
         ("urgencia_pie", "Distribución de Urgencias"),
@@ -1055,6 +1115,7 @@ def notion_create_page(parent_page_id: str,
         ("urgencia_por_issue", "Urgencia por Issue"),
         ("urgencia_top_issues", "Urgencias en Top Issues (agrupadas)"),
         ("canal_por_issue", "Canal por Issue"),
+        ("ttr_por_urgencia", "TTR por Urgencia (horas)"),   # NUEVO
     ]:
         blk = _image_external_if_valid((chart_urls or {}).get(key), caption)
         if blk:
@@ -1065,7 +1126,6 @@ def notion_create_page(parent_page_id: str,
     # Categorizaciones manuales
     blocks.append(_h2("Categorizaciones manuales"))
 
-    # Tema
     blocks.append(_h3("Tema"))
     tema_series = df["tema_norm"].fillna("").replace({"nan": ""}).astype(str).str.strip()
     tema_vc = tema_series[tema_series != ""].value_counts().head(5)
@@ -1077,7 +1137,6 @@ def notion_create_page(parent_page_id: str,
     if insights.get("tema_counts"):
         blocks.append(_callout(insights["tema_counts"], icon="💡"))
 
-    # Motivo
     blocks.append(_h3("Motivo"))
     motivo_series = df["motivo_norm"].fillna("").replace({"nan": ""}).astype(str).str.strip()
     motivo_vc = motivo_series[motivo_series != ""].value_counts().head(5)
@@ -1210,7 +1269,7 @@ def run(csv_path: str,
     df["resumen_qc"] = df.apply(lambda r: r["resumen_ia"] if not _is_vague_summary(r.get("resumen_ia","")) else _enrich_summary(r), axis=1)
     df["insight_qc"] = df.apply(lambda r: r["insight_ia"] if not _is_vague_insight(r.get("insight_ia","")) else _enrich_insight(r), axis=1)
 
-    # Anti "trío vago" (sólo cuando aplica)
+    # Anti "trío vago"
     mask_trio = (df["sentimiento"].astype(str).str.lower().eq("neutro")) & \
                 (df["urgencia"].astype(str).str.lower().eq("media")) & \
                 (df["csat"].astype(str).eq("3"))
@@ -1219,10 +1278,10 @@ def run(csv_path: str,
     df.loc[mask_trio, "csat"]        = df.loc[mask_trio].apply(lambda r: _csat_rule(r["sentimiento"], r["estado_final"]), axis=1)
     triovago_rate = round(100 * mask_trio.mean(), 1)
 
-    # Heurística de silencio => resuelto (se aplica tras enriquecer resumen)
+    # Heurística de silencio => resuelto
     df["estado_final"] = df.apply(_assume_resuelto_por_silencio, axis=1)
 
-    # Métricas de calidad (qué % tuvimos que enriquecer)
+    # Métricas de calidad
     qc_summary_generic = round(100 * (df["resumen_qc"] != df.get("resumen_ia","")).mean(), 1) if "resumen_ia" in df.columns else 0.0
     qc_insight_generic = round(100 * (df["insight_qc"] != df.get("insight_ia","")).mean(), 1) if "insight_ia" in df.columns else 0.0
 
@@ -1283,6 +1342,7 @@ def run(csv_path: str,
     p_urg_issue, urg_issue_ct = chart_urgencia_por_issue(df, out_dir)
     p_canal_issue, canal_issue_ct = chart_canal_por_issue(df, out_dir)
     p_urg_top, urg_top_ct = chart_urgencias_en_top_issues(df, out_dir)
+    p_ttr_urg, ttr_urg_stats = chart_ttr_por_urgencia(df, out_dir)  # NUEVO
 
     # Assets públicos
     if publish_github and github_repo_path:
@@ -1299,6 +1359,7 @@ def run(csv_path: str,
                     os.path.basename(p_urg_issue),
                     os.path.basename(p_canal_issue),
                     os.path.basename(p_urg_top),
+                    os.path.basename(p_ttr_urg),  # NUEVO
                 ],
             )
             print(f"🌐 Assets publicados en: {assets_base_url}")
@@ -1314,6 +1375,7 @@ def run(csv_path: str,
             "urgencia_por_issue": f"{assets_base_url}/{os.path.basename(p_urg_issue)}",
             "canal_por_issue": f"{assets_base_url}/{os.path.basename(p_canal_issue)}",
             "urgencia_top_issues": f"{assets_base_url}/{os.path.basename(p_urg_top)}",
+            "ttr_por_urgencia": f"{assets_base_url}/{os.path.basename(p_ttr_urg)}",  # NUEVO
         }
 
     # ===== IA: modos, presupuesto y cache =====
@@ -1359,6 +1421,8 @@ def run(csv_path: str,
             try_insight("canal_por_issue", canal_issue_ct)
         if not ai.rate_limited:
             try_insight("urgencia_top_issues", urg_top_ct)
+        if not ai.rate_limited:
+            try_insight("ttr_por_urgencia", ttr_urg_stats.to_dict(orient="records"))  # NUEVO
 
         if not ai.rate_limited and (mode == "full" or ai.budget >= 2):
             tema_counts = df["tema_norm"].fillna("").replace({"nan":""}).astype(str).str.strip()
@@ -1441,7 +1505,8 @@ def run(csv_path: str,
                 "sentimiento_pie": p_sent_pie,
                 "urgencia_por_issue": p_urg_issue,
                 "canal_por_issue": p_canal_issue,
-                "urgencia_top_issues": p_urg_top
+                "urgencia_top_issues": p_urg_top,
+                "ttr_por_urgencia": p_ttr_urg
             },
             "insights": insights,
             "triovago_rate": triovago_rate,
