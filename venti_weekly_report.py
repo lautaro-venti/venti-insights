@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
-- KPIs debajo de Resumen Ejecutivo (tarjetas) + sección "Cómo leer los KPIs"
-- IA con modos (full/lite/off), presupuesto y cache para evitar 429
-- Sanitizado de links y tablas nativas Notion
-- Heurística "silencio => probablemente resuelto"
-- FIXES:
-  * Boxplot "TTR por Urgencia (horas)" + insight (abajo del gráfico)
-  * Insights de gráficos siempre DEBAJO de la imagen
-  * Sin duplicación del insight de Top Issues
-  * Removido bloque público de "trío vago / QC" (solo métricas internas en print)
-  * Pie de Urgencias sin 0% y sin superposiciones
+
+Fixes clave en esta versión:
+- Boxplot "TTR por Urgencia (horas)" + insight (siempre con foquito debajo; con fallback sin IA).
+- Insights de TODOS los gráficos siempre DEBAJO de la imagen (nunca arriba).
+- Sin duplicación del insight de Top Issues.
+- Removido bloque público de "trío vago / QC" (solo métricas internas por print).
+- Pie de Urgencias: oculta 0% y evita superposiciones (autopct que esconde porcentajes <1%).
+- Top 3 issues (bullets) y gráfico usan la MISMA serie de conteos para que coincidan.
 """
 
 import os
@@ -33,7 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # ===================== Config heurística =====================
-SILENCE_MINUTES_ASSUME_RESUELTO = 60  # si no responde el contacto tras far en X min y hubo acción => Resuelto
+SILENCE_MINUTES_ASSUME_RESUELTO = 60  # si no responde el contacto tras FAR en X min y hubo acción => Resuelto
 
 # ===================== Utilidades base =====================
 
@@ -442,6 +440,7 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
     base = int(frs.notna().sum())
     ok = int((frs <= sla_minutes*60).sum()) if base else 0
     tasa_1ra = (ok/base*100.0) if base else None
+
     fr_p50 = float(np.nanmedian(frs)) if base else None
 
     if ttr_secs.notna().any():
@@ -486,10 +485,11 @@ def _autopct_hide_small(pct):
     return ("" if pct < 1 else f"{pct:.0f}%")
 
 def chart_top_issues(df, out_dir):
-    counts = df["issue_group"].value_counts().head(5)
+    counts = df["issue_group"].value_counts()
+    top5 = counts.head(5)
     fig, ax = plt.subplots(figsize=(8,5))
-    labels = list(counts.index)
-    vals = list(counts.values)
+    labels = list(top5.index)
+    vals = list(top5.values)
     y = np.arange(len(labels))
     bars = ax.barh(y, vals)
     ax.set_yticks(y); ax.set_yticklabels(labels)
@@ -501,7 +501,7 @@ def chart_top_issues(df, out_dir):
         ax.text(w + max(vals)*0.01, b.get_y()+b.get_height()/2, f"{vals[i]}", va="center")
     p = os.path.join(out_dir, "top_issues.png")
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
-    return p, counts
+    return p, counts  # devolvemos TODOS los conteos para que el bullet use la misma serie
 
 def chart_urgencia_pie(df, out_dir):
     counts = df["urgencia"].fillna("Sin dato").replace({"nan":"Sin dato"}).value_counts()
@@ -510,7 +510,7 @@ def chart_urgencia_pie(df, out_dir):
     fig, ax = plt.subplots(figsize=(6,6))
     if len(vals) == 0:
         vals = [1]; labels = ["Sin datos"]
-    wedges, texts, autotexts = ax.pie(vals, labels=labels, autopct=_autopct_hide_small, startangle=90, pctdistance=0.75)
+    ax.pie(vals, labels=labels, autopct=_autopct_hide_small, startangle=90, pctdistance=0.75)
     ax.axis("equal")
     ax.set_title("Distribución de Urgencias")
     p = os.path.join(out_dir, "urgencia_pie.png")
@@ -524,7 +524,7 @@ def chart_sentimiento_pie(df, out_dir):
     fig, ax = plt.subplots(figsize=(6,6))
     if len(vals) == 0:
         vals = [1]; labels = ["Sin datos"]
-    wedges, texts, autotexts = ax.pie(vals, labels=labels, autopct=_autopct_hide_small, startangle=90, pctdistance=0.75)
+    ax.pie(vals, labels=labels, autopct=_autopct_hide_small, startangle=90, pctdistance=0.75)
     ax.axis("equal")
     ax.set_title("Distribución de Sentimientos")
     p = os.path.join(out_dir, "sentimiento_pie.png")
@@ -743,7 +743,7 @@ def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None,
         "Devuelve SOLO JSON válido con claves 'Producto','Tech','CX'."
     )
     txt = gemini_generate_text(prompt, api_key=api_key, model=model, max_output_tokens=320)
-    if txt == "__RATE_LIMIT__":
+    if txt == "__RATE_LIMIT__":  # sin ruido en reportes
         return {"__rate_limited__": True}
     try:
         obj = json.loads(txt)
@@ -1001,7 +1001,6 @@ def build_kpi_section_blocks(kpis: dict | None, total_items: int) -> list[dict]:
     pct_val = kpis.get("tasa_1ra_respuesta", None)
     pct = f"{pct_val:.0f}%" if isinstance(pct_val, (int,float)) else "—"
     base = kpis.get("first_base", 0); ok = kpis.get("first_ok", 0)
-    med_first = _fmt_min_from_sec(kpis.get("first_resp_p50_s"))
     ttr_mean = _fmt_h(kpis.get("ttr_horas"))
     ttr_p50  = _fmt_h(kpis.get("ttr_p50_h"))
     ttr_p90  = _fmt_h(kpis.get("ttr_p90_h"))
@@ -1019,7 +1018,6 @@ def build_kpi_section_blocks(kpis: dict | None, total_items: int) -> list[dict]:
     return blocks
 
 def build_kpi_glossary_blocks(kpis: dict | None, total_items: int) -> list[dict]:
-    """Descripción de KPIs (como nos pasaste), con números dinámicos."""
     if not kpis:
         return []
     pct_val = kpis.get("tasa_1ra_respuesta", None)
@@ -1068,7 +1066,8 @@ def notion_create_page(parent_page_id: str,
                        chart_urls: dict,
                        insights: dict,
                        acciones_ai: dict | None = None,
-                       kpis: dict | None = None):
+                       kpis: dict | None = None,
+                       top_counts_series: pd.Series | None = None):
     blocks = []
     blocks.append(_h1(page_title))
 
@@ -1085,11 +1084,12 @@ def notion_create_page(parent_page_id: str,
     blocks.append(_divider())
     blocks.extend(build_kpi_glossary_blocks(kpis, total_items=len(df)))
 
-    # Top 3 issues (sin insight para evitar duplicado; insight va debajo del gráfico)
+    # Top 3 issues (usa la MISMA serie que el gráfico)
     blocks.append(_divider())
     blocks.append(_h2("Top 3 issues"))
     total_len = max(len(df), 1)
-    top3 = df["issue_group"].value_counts().head(3)
+    series = (top_counts_series if top_counts_series is not None else df["issue_group"].value_counts())
+    top3 = series.head(3)
     if len(top3) == 0:
         blocks.append(_para("—"))
     else:
@@ -1206,6 +1206,38 @@ def notion_create_page(parent_page_id: str,
 
 # ===================== Core =====================
 
+def _fallback_insights(insights: dict,
+                       top_counts: pd.Series,
+                       urg_counts: pd.Series,
+                       sent_counts: pd.Series,
+                       ttr_urg_stats: dict):
+    """Genera insights determinísticos cuando no hay IA, incluyendo el foquito de TTR por urgencia."""
+    if "top_issues" not in insights and len(top_counts):
+        issue0, n0 = top_counts.index[0], int(top_counts.iloc[0])
+        insights["top_issues"] = f"El principal problema es {issue0} ({n0} casos). Priorizar fixes para reducir volumen y TTR."
+
+    if "urgencia_pie" not in insights and len(urg_counts):
+        alta = int(urg_counts.get("Alta", 0)); media = int(urg_counts.get("Media", 0))
+        tot = int(urg_counts.sum() or 1)
+        insights["urgencia_pie"] = f"El {round(100*(alta+media)/tot)}% de los tickets son Alta/Media. Asegurar priorización y SLAs."
+
+    if "sentimiento_pie" not in insights and len(sent_counts):
+        neg = int(sent_counts.get("Negativo", 0)); tot = int(sent_counts.sum() or 1)
+        if neg:
+            insights["sentimiento_pie"] = f"El {round(100*neg/tot)}% de los tickets reflejan sentimiento negativo. Revisar comunicación y tiempos."
+
+    if "ttr_por_urgencia_box" not in insights and ttr_urg_stats:
+        def fmt(h): 
+            return f"{h:.1f} h" if isinstance(h, (int,float)) else "—"
+        p50_alt = ttr_urg_stats.get("Alta",{}).get("p50")
+        p50_med = ttr_urg_stats.get("Media",{}).get("p50")
+        p50_baj = ttr_urg_stats.get("Baja",{}).get("p50")
+        insights["ttr_por_urgencia_box"] = (
+            f"TTR mediano — Alta: {fmt(p50_alt)}, Media: {fmt(p50_med)}, Baja: {fmt(p50_baj)}. "
+            f"Objetivo: bajar p50 en 'Media' (y mantener 'Alta' < 'Media')."
+        )
+    return insights
+
 def run(csv_path: str,
         out_dir: str,
         notion_token: str | None,
@@ -1316,7 +1348,7 @@ def run(csv_path: str,
     total = len(df)
 
     # Gráficos
-    p_top, top_counts = chart_top_issues(df, out_dir)
+    p_top,   all_counts = chart_top_issues(df, out_dir)   # serie completa
     p_urg_pie, urg_counts = chart_urgencia_pie(df, out_dir)
     p_sent_pie, sent_counts = chart_sentimiento_pie(df, out_dir)
     p_urg_issue, urg_issue_ct = chart_urgencia_por_issue(df, out_dir)
@@ -1392,7 +1424,7 @@ def run(csv_path: str,
             if txt:
                 insights[name] = txt
 
-        try_insight("top_issues", top_counts.to_dict())
+        try_insight("top_issues", all_counts.to_dict())
         try_insight("urgencia_pie", urg_counts.to_dict())
         try_insight("sentimiento_pie", sent_counts.to_dict())
         if not ai.rate_limited:
@@ -1429,9 +1461,12 @@ def run(csv_path: str,
             cache[fp] = {"insights": insights, "acciones_ai": acciones_ai}
             _save_ai_cache(cache_path, cache)
 
+    # Fallbacks determinísticos (garantiza foquito en TTR por urgencia)
+    insights = _fallback_insights(insights, all_counts, urg_counts, sent_counts, ttr_urg_stats)
+
     used = budget - ai.budget
     print(f"🤖 IA → modo={mode} | usadas={used}/{budget} | rate_limited={ai.rate_limited} | insights={len(insights)} | acciones={len(acciones_ai)}")
-    # También mostramos métricas internas (no se publican)
+    # Métricas internas (no públicas)
     print(json.dumps({"triovago_rate_%": triovago_rate}, ensure_ascii=False))
 
     # Notion
@@ -1452,7 +1487,8 @@ def run(csv_path: str,
             chart_urls=chart_urls,
             insights=insights,
             acciones_ai=acciones_ai if acciones_ai else None,
-            kpis=kpis
+            kpis=kpis,
+            top_counts_series=all_counts
         )
         print(f"✅ Publicado en Notion: {page.get('url','(sin url)')}")
     else:
