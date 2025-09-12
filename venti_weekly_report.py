@@ -484,24 +484,40 @@ def _fmt_h(h):
 def _autopct_hide_small(pct):
     return ("" if pct < 1 else f"{pct:.0f}%")
 
-def chart_top_issues(df, out_dir):
-    counts = df["issue_group"].value_counts()
-    top5 = counts.head(5)
+def chart_top_issues(data, out_dir, filename="top_issues.png"):
+    """
+    Acepta:
+      - resumen_df con columnas ['issue','casos'], o
+      - df crudo con columna 'issue_group'
+    """
+    if isinstance(data, pd.DataFrame) and {"issue","casos"}.issubset(data.columns):
+        counts = (data
+                  .sort_values("casos", ascending=False)
+                  .set_index("issue")["casos"]
+                  .head(5))
+    else:
+        counts = data["issue_group"].value_counts().head(5)
+
     fig, ax = plt.subplots(figsize=(8,5))
-    labels = list(top5.index)
-    vals = list(top5.values)
+    labels = list(counts.index)
+    vals = list(counts.values)
     y = np.arange(len(labels))
     bars = ax.barh(y, vals)
     ax.set_yticks(y); ax.set_yticklabels(labels)
     ax.set_title("Top Issues"); ax.set_xlabel("Casos")
     ax.invert_yaxis()
+
     # Etiquetas con valor
     for i, b in enumerate(bars):
         w = b.get_width()
-        ax.text(w + max(vals)*0.01, b.get_y()+b.get_height()/2, f"{vals[i]}", va="center")
-    p = os.path.join(out_dir, "top_issues.png")
+        ax.text(w + (max(vals)*0.01 if vals else 0.3),
+                b.get_y()+b.get_height()/2,
+                f"{vals[i]}", va="center")
+
+    p = os.path.join(out_dir, filename)
     plt.tight_layout(); fig.savefig(p); plt.close(fig)
-    return p, counts  # devolvemos TODOS los conteos para que el bullet use la misma serie
+    return p, counts
+
 
 def chart_urgencia_pie(df, out_dir):
     counts = df["urgencia"].fillna("Sin dato").replace({"nan":"Sin dato"}).value_counts()
@@ -1089,11 +1105,14 @@ def notion_create_page(parent_page_id: str,
     blocks.append(_h2("Top 3 issues"))
     total_len = max(len(df), 1)
     series = (top_counts_series if top_counts_series is not None else df["issue_group"].value_counts())
-    top3 = series.head(3)
-    if len(top3) == 0:
+    top3_rows = resumen_df.sort_values("casos", ascending=False).head(3)
+    if len(top3_rows) == 0:
         blocks.append(_para("—"))
     else:
-        for issue, casos in top3.items():
+        total_len = max(len(df), 1)
+        for _, r in top3_rows.iterrows():
+            issue = str(r.get("issue",""))
+            casos = int(r.get("casos",0) or 0)
             pct_issue = f"{(casos/total_len*100):.0f}%"
             blocks.append(_bullet(f"{issue} → {casos} casos ({pct_issue})"))
 
