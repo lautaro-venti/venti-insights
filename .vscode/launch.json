@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    
+    {
+      "name": "Python: Archivo actual",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${fileDirname}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": { "PYTHONUNBUFFERED": "1" },
+      "subProcess": true,
+      "logToFile": true
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + Gemini API)
+Venti – Insight IA: Reporte semanal Intercom (Notion narrativo + OpenAI API)
 
 Fixes clave en esta versión:
 - Boxplot "TTR por Urgencia (horas)" + insight (siempre con foquito debajo; con fallback sin IA).
@@ -10,6 +10,10 @@ Fixes clave en esta versión:
 - Pie de Urgencias: oculta 0% y evita superposiciones (autopct que esconde porcentajes <1%).
 - Top 3 issues (bullets) y gráfico usan la MISMA serie de conteos para que coincidan.
 - Anti-caché: querystring único en imágenes Notion + Top Issues con nombre versionado por fingerprint.
+
+Migración:
+- Reemplazo Gemini → OpenAI (chat.completions vía HTTP). Env var/flag: OPENAI_API_KEY.
+- Flags nuevos: --openai_api_key, --openai_model (default: gpt-4o-mini).
 """
 
 import os
@@ -33,6 +37,10 @@ import matplotlib.pyplot as plt
 
 # ===================== Config heurística =====================
 SILENCE_MINUTES_ASSUME_RESUELTO = 60  # si no responde el contacto tras FAR en X min y hubo acción => Resuelto
+
+# ===================== CONFIG PERSONALIZADA =====================
+# Ruta absoluta del calendario de eventos (ya en ARS) — (no usado por ahora, se deja como referencia)
+EVENTS_PATH_DEFAULT = r"A:\Venti CX\venti-insights\calendario_de_eventos.xlsx"
 
 # ===================== Utilidades base =====================
 
@@ -195,7 +203,7 @@ def build_text_base(row: pd.Series) -> str:
 # ----------------- CSAT/ESTADO/ISSUES -----------------
 
 def pick_csats(row):
-    for k in ["csat", "csat_ic", "csat_intercom", "csat_ia", "csat_modelo", "csat_gemini"]:
+    for k in ["csat", "csat_ic", "csat_intercom", "csat_ia", "csat_modelo", "csat_gemini", "csat_openai"]:
         if k in row and pd.notna(row[k]):
             try:
                 v = int(float(row[k]))
@@ -645,7 +653,7 @@ def compare_with_prev(issues_df: pd.DataFrame, hist_dir="./hist") -> pd.DataFram
     issues_df["wow_change_pct"], issues_df["anomaly_flag"] = zip(*issues_df.apply(lambda r: calc(r["issue"], r["casos"]), axis=1))
     return issues_df
 
-# ===================== Gemini (API REST) + presupuesto/cache =====================
+# ===================== OpenAI (API REST) + presupuesto/cache =====================
 
 class _AIBudget:
     def __init__(self, budget:int):
@@ -686,54 +694,68 @@ def _save_ai_cache(cache_path: str, cache_obj: dict):
     except Exception:
         pass
 
-def gemini_generate_text(prompt, api_key=None, model="gemini-1.5-flash",
-                         temperature=0.3, max_output_tokens=256,
-                         retries=4, backoff=2.0):
-    api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+def openai_generate_text(prompt,
+                         api_key=None,
+                         model="gpt-4o-mini",
+                         temperature=0.3,
+                         max_tokens=256,
+                         retries=4,
+                         backoff=2.0):
+    """
+    Llama a OpenAI Chat Completions (text-only). Devuelve str o tokens de control.
+    """
+    api_key = api_key or os.getenv("OPENAI_API_KEY")
     if not api_key:
-        print("⚠️ GEMINI_API_KEY/GOOGLE_API_KEY no seteado. Saltando.")
+        print("⚠️ OPENAI_API_KEY no seteado. Saltando.")
         return ""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_output_tokens}
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    payload = {
+        "model": model,
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+        "messages": [
+            {"role": "system", "content": "Eres un analista de CX. Responde en español, conciso y ejecutivo."},
+            {"role": "user", "content": str(prompt)}
+        ]
     }
     for attempt in range(retries):
         try:
-            r = requests.post(url, headers=headers, data=json.dumps(data), timeout=40)
+            r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=40)
             if r.status_code == 429:
-                print("❌ Gemini 429 (rate limit).")
+                print("❌ OpenAI 429 (rate limit).")
                 return "__RATE_LIMIT__"
-            if r.status_code == 503:
+            if r.status_code in (502, 503, 504):
                 wait = backoff ** attempt
-                print(f"❌ Gemini 503 (overloaded). Retry {attempt+1}/{retries} en {wait:.1f}s")
+                print(f"❌ OpenAI {r.status_code} (overloaded). Retry {attempt+1}/{retries} en {wait:.1f}s")
                 time.sleep(wait)
                 continue
             if not r.ok:
-                print(f"❌ Gemini HTTP {r.status_code}. Body: {r.text[:400]}")
+                print(f"❌ OpenAI HTTP {r.status_code}. Body: {r.text[:400]}")
                 return "__UNAVAILABLE__"
             out = r.json()
-            cand = (out.get("candidates") or [{}])[0]
-            parts = ((cand.get("content") or {}).get("parts") or [{}])
-            return parts[0].get("text", "").strip()
+            msg = (out.get("choices") or [{}])[0].get("message", {})
+            return (msg.get("content") or "").strip()
         except requests.Timeout:
-            print("⏱️ Timeout Gemini.")
+            print("⏱️ Timeout OpenAI.")
         except Exception as e:
-            print(f"❌ Excepción Gemini: {e}")
+            print(f"❌ Excepción OpenAI: {e}")
     return "__UNAVAILABLE__"
 
-def _gemini_smoke_test(api_key: str | None, model: str) -> None:
-    if not (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
-        print("ℹ️ Gemini no configurado (sin API key). Insights deshabilitados.")
+def _openai_smoke_test(api_key: str | None, model: str) -> None:
+    if not (api_key or os.getenv("OPENAI_API_KEY")):
+        print("ℹ️ OpenAI no configurado (sin API key). Insights deshabilitados.")
         return
-    txt = gemini_generate_text("Ping: responde 'OK' si recibiste este mensaje.", api_key=api_key, model=model, max_output_tokens=8)
+    txt = openai_generate_text("Responde solo: OK", api_key=api_key, model=model, max_tokens=8)
     if txt:
-        print(f"✅ Gemini listo. Respuesta: {txt[:50]}")
+        print(f"✅ OpenAI listo. Respuesta: {txt[:50]}")
     else:
-        print("⚠️ Gemini no respondió. Verifica key, cuotas o permisos.")
+        print("⚠️ OpenAI no respondió. Verifica key, cuotas o permisos.")
 
-def ai_insight_for_chart(chart_name: str, stats_obj, api_key: str | None = None, model: str = "gemini-1.5-flash") -> str:
+def ai_insight_for_chart(chart_name: str, stats_obj, api_key: str | None = None, model: str = "gpt-4o-mini") -> str:
     if isinstance(stats_obj, pd.DataFrame):
         snap = stats_obj.head(10).to_string()
     else:
@@ -748,9 +770,9 @@ def ai_insight_for_chart(chart_name: str, stats_obj, api_key: str | None = None,
         f"2 frases máximo, español, tono ejecutivo. Datos:\n{snap}\n"
         "Formato: observación concreta + recomendación."
     )
-    return gemini_generate_text(prompt, api_key=api_key, model=model, max_output_tokens=200)
+    return openai_generate_text(prompt, api_key=api_key, model=model, max_tokens=200)
 
-def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None, model: str = "gemini-1.5-flash") -> dict:
+def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None, model: str = "gpt-4o-mini") -> dict:
     ctx_json = json.dumps(contexto, ensure_ascii=False)
     prompt = (
         f"Eres PM/Analyst en una empresa de tickets. "
@@ -759,7 +781,7 @@ def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None,
         f"Contexto: {ctx_json}\n"
         "Devuelve SOLO JSON válido con claves 'Producto','Tech','CX'."
     )
-    txt = gemini_generate_text(prompt, api_key=api_key, model=model, max_output_tokens=320)
+    txt = openai_generate_text(prompt, api_key=api_key, model=model, max_tokens=320)
     if txt == "__RATE_LIMIT__":
         return {"__rate_limited__": True}
     try:
@@ -1264,8 +1286,8 @@ def run(csv_path: str,
         github_repo_path: str | None = None,
         github_branch: str = "main",
         assets_base_url: str | None = None,
-        gemini_api_key: str | None = None,
-        gemini_model: str = "gemini-1.5-flash",
+        openai_api_key: str | None = None,
+        openai_model: str = "gpt-4o-mini",
         sla_first_reply_min: int = 15,
         ai_mode: str = "full",
         ai_budget: int = 100):
@@ -1320,7 +1342,7 @@ def run(csv_path: str,
     df["estado_final"] = df.apply(_assume_resuelto_por_silencio, axis=1)
 
     # KPI desde crudos (+ guarda frs/ttr al df)
-    _gemini_smoke_test(gemini_api_key, gemini_model)
+    _openai_smoke_test(openai_api_key, openai_model)
     kpis = compute_kpis_from_raw_df(df, sla_minutes=sla_first_reply_min)
     if "estado_final" in df.columns:
         kpis["tickets_resueltos"] = int((df["estado_final"] == "Resuelto").sum())
@@ -1436,13 +1458,13 @@ def run(csv_path: str,
         insights = cached.get("insights", {})
         acciones_ai = cached.get("acciones_ai", {})
         print(f"♻️ Reutilizando insights desde cache. insights={len(insights)} | acciones={len(acciones_ai)}")
-    elif budget > 0 and (gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
+    elif budget > 0 and (openai_api_key or os.getenv("OPENAI_API_KEY")):
         def try_insight(name, obj):
             nonlocal insights
             if not ai.take():
                 return
-            txt = ai_insight_for_chart(name, obj, api_key=gemini_api_key, model=gemini_model)
-            if txt == "__RATE_LIMIT__":
+            txt = ai_insight_for_chart(name, obj, api_key=openai_api_key, model=openai_model)
+            if txt == "__RATE_LIMIT__":  # corta toda la sesión si pega rate limit
                 ai.rate_limited = True
                 return
             if txt:
@@ -1474,7 +1496,7 @@ def run(csv_path: str,
                 "total_casos_issue": int(row.get("casos",0) or 0),
                 "total_casos_semana": total
             }
-            add = ai_actions_for_issue(issue, ctx, api_key=gemini_api_key, model=gemini_model)
+            add = ai_actions_for_issue(issue, ctx, api_key=openai_api_key, model=openai_model)
             if add.get("__rate_limited__"):
                 ai.rate_limited = True
                 break
@@ -1489,7 +1511,7 @@ def run(csv_path: str,
     insights = _fallback_insights(insights, top_counts, urg_counts, sent_counts, ttr_urg_stats)
 
     used = budget - ai.budget
-    print(f"🤖 IA → modo={mode} | usadas={used}/{budget} | rate_limited={ai.rate_limited} | insights={len(insights)} | acciones={len(acciones_ai)}")
+    print(f"🤖 IA (OpenAI) → modo={mode} | usadas={used}/{budget} | rate_limited={ai.rate_limited} | insights={len(insights)} | acciones={len(acciones_ai)}")
     # Métricas internas (no públicas)
     print(json.dumps({"triovago_rate_%": triovago_rate}, ensure_ascii=False))
 
@@ -1535,7 +1557,7 @@ def run(csv_path: str,
 # ===================== CLI =====================
 
 def main():
-    ap = argparse.ArgumentParser(description="Venti – Insight IA (Notion narrativo + Gemini API)")
+    ap = argparse.ArgumentParser(description="Venti – Insight IA (Notion narrativo + OpenAI API)")
     ap.add_argument("--csv", required=True, help="Ruta al CSV de conversaciones")
     ap.add_argument("--out", default="./salida", help="Directorio de salida")
     ap.add_argument("--notion_token", default=os.getenv("NOTION_TOKEN"), help="Token de Notion")
@@ -1544,11 +1566,11 @@ def main():
     ap.add_argument("--github_repo_path", default=None, help="Ruta local al repo clonado")
     ap.add_argument("--github_branch", default="main", help="Branch destino")
     ap.add_argument("--assets_base_url", default=None, help="URL base pública ya hosteada (si no publicas a GitHub)")
-    ap.add_argument("--gemini_api_key", default=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"), help="API key de Gemini")
-    ap.add_argument("--gemini_model", default="gemini-1.5-flash", help="Modelo de Gemini")
+    ap.add_argument("--openai_api_key", default=os.getenv("OPENAI_API_KEY"), help="API key de OpenAI")
+    ap.add_argument("--openai_model", default="gpt-4o-mini", help="Modelo de OpenAI (p.ej., gpt-4o-mini, o4-mini)")
     ap.add_argument("--sla_first_reply_min", type=int, default=15, help="SLA (min) para % 1ra respuesta")
     ap.add_argument("--ai_mode", choices=["full","lite","off"], default="full", help="Nivel de generación con IA")
-    ap.add_argument("--ai_budget", type=int, default=100, help="Máximo de requests a Gemini por corrida")
+    ap.add_argument("--ai_budget", type=int, default=100, help="Máximo de requests a OpenAI por corrida")
     args = ap.parse_args()
 
     print("▶ Script iniciado")
@@ -1566,8 +1588,8 @@ def main():
         github_repo_path=args.github_repo_path,
         github_branch=args.github_branch,
         assets_base_url=args.assets_base_url,
-        gemini_api_key=args.gemini_api_key,
-        gemini_model=args.gemini_model,
+        openai_api_key=args.openai_api_key,
+        openai_model=args.openai_model,
         sla_first_reply_min=args.sla_first_reply_min,
         ai_mode=args.ai_mode,
         ai_budget=args.ai_budget
