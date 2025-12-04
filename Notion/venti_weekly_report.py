@@ -14,6 +14,10 @@ Fixes clave en esta versión:
 Migración:
 - Reemplazo Gemini → OpenAI (chat.completions vía HTTP). Env var/flag: OPENAI_API_KEY.
 - Flags nuevos: --openai_api_key, --openai_model (default: gpt-4o-mini).
+
+Novedades:
+- Resumen y accionables **por área** (CX/CS): tablas + to-dos específicos por área.
+- Flag CLI: --areas_focus (por defecto "CX,Customer Success").
 """
 
 import os
@@ -46,6 +50,7 @@ EVENTS_PATH_DEFAULT = r"A:\Venti CX\venti-insights\calendario_de_eventos.xlsx"
 
 EMOJI_RX = re.compile(r"[\U00010000-\U0010FFFF]", flags=re.UNICODE)
 
+
 def _safe_str(v: object) -> str:
     try:
         if v is None:
@@ -59,18 +64,23 @@ def _safe_str(v: object) -> str:
     except Exception:
         return ""
 
+
 def strip_emojis(s: str) -> str:
     try:
         return EMOJI_RX.sub("", s or "")
     except Exception:
         return s or ""
 
+
 def _norm_txt(s: str) -> str:
     if s is None:
         return ""
     s = str(s).strip().lower()
-    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    s = "".join(
+        c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+    )
     return s
+
 
 def load_csv_robusto(csv_path: str) -> pd.DataFrame:
     encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1", "utf-16", "utf-16-le", "utf-16-be"]
@@ -80,9 +90,23 @@ def load_csv_robusto(csv_path: str) -> pd.DataFrame:
         for sep in seps:
             try:
                 if sep is None:
-                    df = pd.read_csv(csv_path, encoding=enc, sep=None, engine="python", dtype=str, on_bad_lines="skip")
+                    df = pd.read_csv(
+                        csv_path,
+                        encoding=enc,
+                        sep=None,
+                        engine="python",
+                        dtype=str,
+                        on_bad_lines="skip",
+                    )
                 else:
-                    df = pd.read_csv(csv_path, encoding=enc, sep=sep, engine="python", dtype=str, on_bad_lines="skip")
+                    df = pd.read_csv(
+                        csv_path,
+                        encoding=enc,
+                        sep=sep,
+                        engine="python",
+                        dtype=str,
+                        on_bad_lines="skip",
+                    )
                 if df.shape[1] >= 2:
                     return df
             except Exception as e:
@@ -94,43 +118,79 @@ def load_csv_robusto(csv_path: str) -> pd.DataFrame:
         pass
     raise RuntimeError(f"No pude leer el CSV. Último error: {last_err}")
 
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     new_cols = []
     for c in df.columns:
         cc = str(c).strip().lower()
         cc = cc.replace(" ", "_").replace("__", "_")
-        cc = (cc
-              .replace("í", "i").replace("á", "a").replace("é", "e")
-              .replace("ó", "o").replace("ú", "u").replace("ñ", "n"))
+        cc = (
+            cc.replace("í", "i")
+            .replace("á", "a")
+            .replace("é", "e")
+            .replace("ó", "o")
+            .replace("ú", "u")
+            .replace("ñ", "n")
+        )
         new_cols.append(cc)
     df.columns = new_cols
 
     aliases = {
         "insight_ia": ["insight", "insightia", "insight_ia"],
         "resumen_ia": ["resumen", "resumenia", "resumen_ia"],
-        "palabras_clave": ["palabras_clave","palabrasclave","keywords"],
-        "canal": ["canal","channel"],
-        "area": ["area","área","area_","area__"],
-        "tema": ["tema","topic"],
-        "motivo": ["motivo","reason"],
-        "submotivo": ["submotivo","sub_reason","submot"],
-        "urgencia": ["urgencia","priority","severity"],
-        "sentimiento": ["sentimiento","sentiment"],
-        "categoria": ["categoria","categoria_","categoría","categoria__"],
-        "link_a_intercom": ["link_a_intercom","link_intercom","link","url_intercom","link__a__intercom"],
-        "id_intercom": ["id_intercom","id","conversation_id"],
-        "fecha": ["fecha","date","created_at"],
-        "rol": ["rol","role"],
+        "palabras_clave": ["palabras_clave", "palabrasclave", "keywords"],
+        "canal": ["canal", "channel"],
+        "area": ["area", "área", "area_", "area__"],
+        "tema": ["tema", "topic"],
+        "motivo": ["motivo", "reason"],
+        "submotivo": ["submotivo", "sub_reason", "submot"],
+        "urgencia": ["urgencia", "priority", "severity"],
+        "sentimiento": ["sentimiento", "sentiment"],
+        "categoria": ["categoria", "categoria_", "categoría", "categoria__"],
+        "link_a_intercom": [
+            "link_a_intercom",
+            "link_intercom",
+            "link",
+            "url_intercom",
+            "link__a__intercom",
+        ],
+        "id_intercom": ["id_intercom", "id", "conversation_id"],
+        "fecha": ["fecha", "date", "created_at"],
+        "rol": ["rol", "role"],
         # KPI crudos / timing
-        "created_at": ["created_at","created","createdat"],
-        "first_admin_reply_at": ["first_admin_reply_at","firstadminreplyat","first_admin_reply","first_response_at"],
-        "first_contact_reply_at": ["first_contact_reply_at","firstcontactreplyat","statistics_first_contact_reply_at","first_contact_reply_created_at"],
-        "closed_at": ["closed_at","closed","first_close_at","statistics_first_close_at","statistics_last_close_at"],
-        "ttr_seconds": ["ttr_seconds","time_to_first_close","statistics_time_to_first_close"],
-        "first_response_seconds": ["first_response_seconds","first_response_time","first_reply_seconds"],
-        "status": ["status","state"],
-        "csat": ["csat","rating","conversation_rating","rating_value"],
+        "created_at": ["created_at", "created", "createdat"],
+        "first_admin_reply_at": [
+            "first_admin_reply_at",
+            "firstadminreplyat",
+            "first_admin_reply",
+            "first_response_at",
+        ],
+        "first_contact_reply_at": [
+            "first_contact_reply_at",
+            "firstcontactreplyat",
+            "statistics_first_contact_reply_at",
+            "first_contact_reply_created_at",
+        ],
+        "closed_at": [
+            "closed_at",
+            "closed",
+            "first_close_at",
+            "statistics_first_close_at",
+            "statistics_last_close_at",
+        ],
+        "ttr_seconds": [
+            "ttr_seconds",
+            "time_to_first_close",
+            "statistics_time_to_first_close",
+        ],
+        "first_response_seconds": [
+            "first_response_seconds",
+            "first_response_time",
+            "first_reply_seconds",
+        ],
+        "status": ["status", "state"],
+        "csat": ["csat", "rating", "conversation_rating", "rating_value"],
     }
     present = set(df.columns)
     for canon, options in aliases.items():
@@ -142,35 +202,87 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
                 present.add(canon)
                 break
 
-    base_cols = ["resumen_ia","insight_ia","palabras_clave","canal","area","tema",
-                 "motivo","submotivo","urgencia","sentimiento","categoria",
-                 "link_a_intercom","id_intercom","fecha","rol"]
+    base_cols = [
+        "resumen_ia",
+        "insight_ia",
+        "palabras_clave",
+        "canal",
+        "area",
+        "tema",
+        "motivo",
+        "submotivo",
+        "urgencia",
+        "sentimiento",
+        "categoria",
+        "link_a_intercom",
+        "id_intercom",
+        "fecha",
+        "rol",
+    ]
     for canon in base_cols:
         if canon not in df.columns:
             df[canon] = ""
     return df
 
+
 # ===================== Taxonomías =====================
 
 VALID_TEMAS = {
-    "eventos - user ticket","eventos - user productora","lead comercial","anuncios & notificaciones",
-    "duplicado","desvío a intercom","sin respuesta",
+    "eventos - user ticket",
+    "eventos - user productora",
+    "lead comercial",
+    "anuncios & notificaciones",
+    "duplicado",
+    "desvío a intercom",
+    "sin respuesta",
 }
 VALID_MOTIVOS = {
-    "caso excepcional","reenvío","estafa por reventa","compra externa a venti","consulta por evento",
-    "team leads & públicas","devolución","pagos","seguridad","evento reprogramado","evento cancelado",
-    "contacto comercial","anuncios & notificaciones","duplicado","desvío a intercom","no recibí mi entrada",
-    "sdu (sist. de usuarios)","transferencia de entradas","qr shield","venti swap","reporte","carga masiva",
-    "envío de invitaciones","carga de un evento","servicios operativos","solicitud de reembolso","adelantos",
-    "liquidaciones","estado de cuenta","datos de cuenta","altas en venti","app de validación","validadores",
-    "organización de accesos en el evento","facturación","sin respuesta","reclamo de usuario",
-    "consulta sobre uso de la plataforma","desvinculación de personal",
+    "caso excepcional",
+    "reenvío",
+    "estafa por reventa",
+    "compra externa a venti",
+    "consulta por evento",
+    "team leads & públicas",
+    "devolución",
+    "pagos",
+    "seguridad",
+    "evento reprogramado",
+    "evento cancelado",
+    "contacto comercial",
+    "anuncios & notificaciones",
+    "duplicado",
+    "desvío a intercom",
+    "no recibí mi entrada",
+    "sdu (sist. de usuarios)",
+    "transferencia de entradas",
+    "qr shield",
+    "venti swap",
+    "reporte",
+    "carga masiva",
+    "envío de invitaciones",
+    "carga de un evento",
+    "servicios operativos",
+    "solicitud de reembolso",
+    "adelantos",
+    "liquidaciones",
+    "estado de cuenta",
+    "datos de cuenta",
+    "altas en venti",
+    "app de validación",
+    "validadores",
+    "organización de accesos en el evento",
+    "facturación",
+    "sin respuesta",
+    "reclamo de usuario",
+    "consulta sobre uso de la plataforma",
+    "desvinculación de personal",
 }
 VALID_SUBMOTIVOS = set()
 
+
 def map_to_catalog(value, catalog):
     v = _norm_txt(value)
-    if not v or v in ("nan","none"):
+    if not v or v in ("nan", "none"):
         return "", False
     norm_catalog = {_norm_txt(x): x for x in catalog}
     if v in norm_catalog:
@@ -181,44 +293,75 @@ def map_to_catalog(value, catalog):
             return raw, True
     return value if isinstance(value, str) else str(value), False
 
+
 def enforce_taxonomy(df: pd.DataFrame) -> pd.DataFrame:
-    df["tema_norm"], df["tema_ok"] = zip(*df["tema"].map(lambda x: map_to_catalog(x, VALID_TEMAS)))
-    df["motivo_norm"], df["motivo_ok"] = zip(*df["motivo"].map(lambda x: map_to_catalog(x, VALID_MOTIVOS)))
+    df["tema_norm"], df["tema_ok"] = zip(
+        *df["tema"].map(lambda x: map_to_catalog(x, VALID_TEMAS))
+    )
+    df["motivo_norm"], df["motivo_ok"] = zip(
+        *df["motivo"].map(lambda x: map_to_catalog(x, VALID_MOTIVOS))
+    )
     if "submotivo" in df.columns and len(VALID_SUBMOTIVOS) > 0:
-        df["submotivo_norm"], df["submotivo_ok"] = zip(*df["submotivo"].map(lambda x: map_to_catalog(x, VALID_SUBMOTIVOS)))
-        df["taxonomy_flag"] = ~(df["tema_ok"] & df["motivo_ok"] & df["submotivo_ok"])
+        df["submotivo_norm"], df["submotivo_ok"] = zip(
+            *df["submotivo"].map(lambda x: map_to_catalog(x, VALID_SUBMOTIVOS))
+        )
+        df["taxonomy_flag"] = ~(
+            df["tema_ok"] & df["motivo_ok"] & df["submotivo_ok"]
+        )
     else:
         df["submotivo_norm"] = df["submotivo"]
         df["taxonomy_flag"] = ~(df["tema_ok"] & df["motivo_ok"])
     return df
 
+
 def build_text_base(row: pd.Series) -> str:
     parts = []
-    for col in ["resumen_ia","insight_ia","palabras_clave","tema_norm","motivo_norm","submotivo_norm","area"]:
-        val = _norm_txt(row.get(col,""))
+    for col in [
+        "resumen_ia",
+        "insight_ia",
+        "palabras_clave",
+        "tema_norm",
+        "motivo_norm",
+        "submotivo_norm",
+        "area",
+    ]:
+        val = _norm_txt(row.get(col, ""))
         if val and val != "nan":
             parts.append(val)
     return " | ".join(parts)
 
+
 # ----------------- CSAT/ESTADO/ISSUES -----------------
 
+
 def pick_csats(row):
-    for k in ["csat", "csat_ic", "csat_intercom", "csat_ia", "csat_modelo", "csat_gemini", "csat_openai"]:
+    for k in [
+        "csat",
+        "csat_ic",
+        "csat_intercom",
+        "csat_ia",
+        "csat_modelo",
+        "csat_gemini",
+        "csat_openai",
+    ]:
         if k in row and pd.notna(row[k]):
             try:
                 v = int(float(row[k]))
                 if 1 <= v <= 5:
                     return v
-            except:
+            except Exception:
                 pass
     return np.nan
+
 
 def estado_final_from(row):
     if "estado_final" in row and pd.notna(row["estado_final"]):
         return str(row["estado_final"]).strip().capitalize()
 
-    status = str(row.get("status","")).strip().lower()
-    resumen = str(row.get("resumen_ia","") or row.get("resumen","")).strip().lower()
+    status = str(row.get("status", "")).strip().lower()
+    resumen = str(
+        row.get("resumen_ia", "") or row.get("resumen", "")
+    ).strip().lower()
 
     if "estado final: resuelto" in resumen or "resuelto" in resumen:
         return "Resuelto"
@@ -229,9 +372,10 @@ def estado_final_from(row):
 
     if status == "closed":
         return "Resuelto"
-    if status in {"open","snoozed"}:
+    if status in {"open", "snoozed"}:
         return "Pendiente"
     return "No resuelto"
+
 
 ISSUE_MAP = {
     "No recibí mi entrada": "Entrega de entradas",
@@ -246,17 +390,36 @@ ISSUE_MAP = {
     "_default": "Otros",
 }
 ISSUE_REGEX_RULES = [
-    ("Entrega de entradas", r"(no\s*recib|reenv[ií]o|link\s*de\s*entrada|entrada(s)?\s*(no)?\s*llega|ticket\s*no|no\s*me\s*ll[eé]g[oó])"),
-    ("Transferencia / titularidad", r"(transferenc|cambio\s*de\s*titular|modificar\s*(nombre|titular)|pasar\s*entrada)"),
+    (
+        "Entrega de entradas",
+        r"(no\s*recib|reenv[ií]o|link\s*de\s*entrada|entrada(s)?\s*(no)?\s*llega|ticket\s*no|no\s*me\s*ll[eé]g[oó])",
+    ),
+    (
+        "Transferencia / titularidad",
+        r"(transferenc|cambio\s*de\s*titular|modificar\s*(nombre|titular)|pasar\s*entrada)",
+    ),
     ("QR / Validación en acceso", r"\bqr\b|validaci[oó]n|validad(or|ores)|escane"),
     ("Pagos / cobros", r"\bpago(s)?\b|cobro|rechazad|tarjeta|mercadopago|\bmp\b|cuotas"),
     ("Reembolso / devolución", r"reembols|devoluci[oó]n|refund|chargeback"),
-    ("Cuenta / login / registro", r"cuenta|login|logue|registr|contrase[nñ]a|clave|verificaci[oó]n\s*de\s*mail|correo\s*inv[aá]lido"),
-    ("App / rendimiento / bug", r"\bapp\b|aplicaci[oó]n|crash|no\s*funciona|bug|error\s*(t[eé]cnico|500|404)"),
+    (
+        "Cuenta / login / registro",
+        r"cuenta|login|logue|registr|contrase[nñ]a|clave|verificaci[oó]n\s*de\s*mail|correo\s*inv[aá]lido",
+    ),
+    (
+        "App / rendimiento / bug",
+        r"\bapp\b|aplicaci[oó]n|crash|no\s*funciona|bug|error\s*(t[eé]cnico|500|404)",
+    ),
     ("Soporte / sin respuesta / SDU", r"sin\s*respuesta|\bsdu\b|jotform|demora|espera"),
-    ("Información de evento", r"consulta\s*por\s*evento|horario|ubicaci[oó]n|vip|mapa|line\s*up|ingreso|puerta"),
-    ("Productores / RRPP / invitaciones", r"invitaci[oó]n|\brrpp\b|productor|productora|validadores|operativo"),
+    (
+        "Información de evento",
+        r"consulta\s*por\s*evento|horario|ubicaci[oó]n|vip|mapa|line\s*up|ingreso|puerta",
+    ),
+    (
+        "Productores / RRPP / invitaciones",
+        r"invitaci[oó]n|\brrpp\b|productor|productora|validadores|operativo",
+    ),
 ]
+
 
 def choose_issue(motivo_final, submotivo_final, texto_base):
     m = _safe_str(motivo_final).strip()
@@ -273,20 +436,49 @@ def choose_issue(motivo_final, submotivo_final, texto_base):
             return label
     return ISSUE_MAP["_default"]
 
+
 # ===================== Heurísticas de Issues =====================
 
 RULES = [
-    ("Entrega de entradas", r"(no\s*recibi|reenvio|link\s*de\s*entrada|entrada(s)?\s*(no)?\s*llega|ticket\s*no\s|no\s*me\s*llego)"),
-    ("Transferencia / titularidad", r"(transferenc|transferir|cambio\s*de\s*titular|modificar\s*(nombre|titular)|pasar\s*entrada)"),
-    ("QR / Validación en acceso", r"(qr|validacion|control\s*de\s*acceso|escaneo|lector|validador)"),
-    ("Pagos / cobros", r"(pago|pagos|cobro|cobrar|rechazad|tarjeta|mercadopago|\bmp\b|cuotas)"),
+    (
+        "Entrega de entradas",
+        r"(no\s*recibi|reenvio|link\s*de\s*entrada|entrada(s)?\s*(no)?\s*llega|ticket\s*no\s|no\s*me\s*llego)",
+    ),
+    (
+        "Transferencia / titularidad",
+        r"(transferenc|transferir|cambio\s*de\s*titular|modificar\s*(nombre|titular)|pasar\s*entrada)",
+    ),
+    (
+        "QR / Validación en acceso",
+        r"(qr|validacion|control\s*de\s*acceso|escaneo|lector|validador)",
+    ),
+    (
+        "Pagos / cobros",
+        r"(pago|pagos|cobro|cobrar|rechazad|tarjeta|mercadopago|\bmp\b|cuotas)",
+    ),
     ("Reembolso / devolución", r"(reembolso|devolucion|refund|chargeback)"),
-    ("Cuenta / login / registro", r"(cuenta|logue|login|registr|contrasena|clave|verificacion\s*de\s*mail|correo\s*invalido)"),
-    ("App / rendimiento / bug", r"(app|aplicacion|crash|se\s*cierra|no\s*funciona|bug|error\s*(tecnico|500|404))"),
-    ("Soporte / sin respuesta / SDU", r"(sin\s*respuesta|derivacion\s*al\s*sdu|\bsdu\b|jotform|demora|espera)"),
-    ("Información de evento", r"(consulta\s*por\s*evento|horario|ubicacion|vip|mapa|line\s*up|capacidad|ingreso|puerta)"),
-    ("Productores / RRPP / invitaciones", r"(invitacion|\brrpp\b|productor|productora|acceso\s*productor|carga\s*de\s*evento|validadores|operativo)"),
+    (
+        "Cuenta / login / registro",
+        r"(cuenta|logue|login|registr|contrasena|clave|verificacion\s*de\s*mail|correo\s*invalido)",
+    ),
+    (
+        "App / rendimiento / bug",
+        r"(app|aplicacion|crash|se\s*cierra|no\s*funciona|bug|error\s*(tecnico|500|404))",
+    ),
+    (
+        "Soporte / sin respuesta / SDU",
+        r"(sin\s*respuesta|derivacion\s*al\s*sdu|\bsdu\b|jotform|demora|espera)",
+    ),
+    (
+        "Información de evento",
+        r"(consulta\s*por\s*evento|horario|ubicacion|vip|mapa|line\s*up|capacidad|ingreso|puerta)",
+    ),
+    (
+        "Productores / RRPP / invitaciones",
+        r"(invitacion|\brrpp\b|productor|productora|acceso\s*productor|carga\s*de\s*evento|validadores|operativo)",
+    ),
 ]
+
 
 def assign_issue_group(text: str) -> str:
     t = _norm_txt(text)
@@ -295,10 +487,18 @@ def assign_issue_group(text: str) -> str:
             return label
     return "Otros"
 
+
 def top_values(series: pd.Series, n=3) -> str:
-    vc = series.fillna("").replace("nan","").astype(str).str.strip().value_counts()
+    vc = (
+        series.fillna("")
+        .replace("nan", "")
+        .astype(str)
+        .str.strip()
+        .value_counts()
+    )
     items = [f"{idx} ({cnt})" for idx, cnt in vc.head(n).items() if idx]
     return ", ".join(items)
+
 
 def _safe_lower(x):
     try:
@@ -308,41 +508,69 @@ def _safe_lower(x):
     except Exception:
         return ""
 
+
 def compute_flags(row: pd.Series) -> pd.Series:
-    txt = " ".join(str(row.get(c,"") or "") for c in
-                   ["resumen_ia","insight_ia","palabras_clave","tema_norm","motivo_norm","submotivo_norm"]).lower()
-    urg = _safe_lower(row.get("urgencia",""))
-    canal = _safe_lower(row.get("canal",""))
+    txt = " ".join(
+        str(row.get(c, "") or "")
+        for c in [
+            "resumen_ia",
+            "insight_ia",
+            "palabras_clave",
+            "tema_norm",
+            "motivo_norm",
+            "submotivo_norm",
+        ]
+    ).lower()
+    urg = _safe_lower(row.get("urgencia", ""))
+    canal = _safe_lower(row.get("canal", ""))
     risk = "LOW"
-    if any(k in _norm_txt(txt) for k in ["estafa","fraude","no puedo entrar","no puedo ingresar","rechazad"]):
+    if any(
+        k in _norm_txt(txt)
+        for k in ["estafa", "fraude", "no puedo entrar", "no puedo ingresar", "rechazad"]
+    ):
         risk = "HIGH"
-    elif urg in ("alta","high"):
+    elif urg in ("alta", "high"):
         risk = "HIGH"
-    elif urg in ("media","medium"):
+    elif urg in ("media", "medium"):
         risk = "MEDIUM"
-    sla_now = (canal in ("whatsapp","instagram")) and (risk == "HIGH")
+    sla_now = (canal in ("whatsapp", "instagram")) and (risk == "HIGH")
     return pd.Series({"risk": risk, "sla_now": sla_now})
+
 
 # ===================== Enrichment / reglas =====================
 
+
 def _is_vague_summary(s: str) -> bool:
-    ss = (_norm_txt(s) or "")
+    ss = _norm_txt(s) or ""
     return (not ss) or ("caso sin resumen explicito" in ss) or (len(ss) < 30)
 
+
 def _is_vague_insight(s: str) -> bool:
-    ss = (_norm_txt(s) or "")
+    ss = _norm_txt(s) or ""
     return (not ss) or ("registrar el caso y monitorear patrones" in ss) or (len(ss) < 30)
+
 
 def _enrich_summary(row) -> str:
     canal = _safe_str(row.get("canal") or "-")
-    rol   = _safe_str(row.get("rol") or "-")
-    tema  = _safe_str(row.get("tema_norm") or row.get("tema") or "")
-    mot   = _safe_str(row.get("motivo_norm") or row.get("motivo") or "")
-    sub   = _safe_str(row.get("submotivo_norm") or row.get("submotivo") or "")
-    estado= _safe_str(row.get("estado_final") or "")
-    tbase = _norm_txt(row.get("texto_base",""))
+    rol = _safe_str(row.get("rol") or "-")
+    tema = _safe_str(row.get("tema_norm") or row.get("tema") or "")
+    mot = _safe_str(row.get("motivo_norm") or row.get("motivo") or "")
+    sub = _safe_str(row.get("submotivo_norm") or row.get("submotivo") or "")
+    estado = _safe_str(row.get("estado_final") or "")
+    tbase = _norm_txt(row.get("texto_base", ""))
     action = "seguimiento"
-    if any(w in tbase for w in ["se envio","reenvio","informamos","adjuntamos","validacion","corregido","listo"]):
+    if any(
+        w in tbase
+        for w in [
+            "se envio",
+            "reenvio",
+            "informamos",
+            "adjuntamos",
+            "validacion",
+            "corregido",
+            "listo",
+        ]
+    ):
         action = "info enviada"
     pedido = "qué pidió o reportó el usuario"
     if "correo invalido" in tbase or "registro" in tbase:
@@ -364,42 +592,73 @@ def _enrich_summary(row) -> str:
     base += f"; acción: {action}."
     return base
 
+
 def _enrich_insight(row) -> str:
     issue = _safe_str(row.get("issue_group") or "Caso")
     sent = _safe_lower(row.get("sentimiento", ""))
-    urg  = _safe_lower(row.get("urgencia", ""))
-    kpi  = "CSAT" if sent == "negativo" else "TTR"
+    urg = _safe_lower(row.get("urgencia", ""))
+    kpi = "CSAT" if sent == "negativo" else "TTR"
     prio = "Alta" if urg == "alta" else "Media"
-    recs  = {
+    recs = {
         "QR / Validación en acceso": "Ingeniería: health-checks y telemetría de validadores | CX: guía de acceso",
         "Pagos / cobros": "Producto: mostrar causa de rechazo | Tech: retries PSP | CX: macro paso a paso",
         "Entrega de entradas": "Producto: CTA reenvío visible | Tech: job idempotente | CX: bot reenvío",
     }
-    extra = recs.get(issue, "Producto: quick wins de UX | Tech: logging/tracing | CX: macro específica")
-    return f"{issue}: priorizar fixes. {extra} — Prioridad: {prio}; Métrica: {kpi}; Tiempo: 2–3 semanas."
+    extra = recs.get(
+        issue,
+        "Producto: quick wins de UX | Tech: logging/tracing | CX: macro específica",
+    )
+    return (
+        f"{issue}: priorizar fixes. {extra} — Prioridad: {prio}; Métrica: {kpi}; Tiempo: 2–3 semanas."
+    )
+
 
 def _sent_rule(text: str) -> str:
     t = _norm_txt(text)
-    if any(w in t for w in ["queja","estafa","fraude","no puedo","rechazad","error","fallo","no funciona"]): return "Negativo"
-    if any(w in t for w in ["gracias","excelente","solucionado","todo ok","genial"]): return "Positivo"
+    if any(w in t for w in ["queja", "estafa", "fraude", "no puedo", "rechazad", "error", "fallo", "no funciona"]):
+        return "Negativo"
+    if any(w in t for w in ["gracias", "excelente", "solucionado", "todo ok", "genial"]):
+        return "Positivo"
     return "Neutro"
+
 
 def _urg_rule(text: str) -> str:
     t = _norm_txt(text)
-    if any(w in t for w in ["hoy","ya","urgente","evento","no puedo ingresar","no puedo entrar","qr","validador","no recibi mi entrada"]): return "Alta"
-    if any(w in t for w in ["consulta","informacion","como hago","quiero saber"]): return "Baja"
+    if any(
+        w in t
+        for w in [
+            "hoy",
+            "ya",
+            "urgente",
+            "evento",
+            "no puedo ingresar",
+            "no puedo entrar",
+            "qr",
+            "validador",
+            "no recibi mi entrada",
+        ]
+    ):
+        return "Alta"
+    if any(w in t for w in ["consulta", "informacion", "como hago", "quiero saber"]):
+        return "Baja"
     return "Media"
 
-def _csat_rule(sent:str, estado:str) -> int:
-    s = (sent or "").lower(); e = (estado or "").lower()
-    if e == "no resuelto" or s == "negativo": return 1 if e == "no resuelto" else 2
-    if e == "resuelto": return 4 if s != "negativo" else 3
-    if e == "pendiente": return 2 if s == "negativo" else 3
+
+def _csat_rule(sent: str, estado: str) -> int:
+    s = (sent or "").lower()
+    e = (estado or "").lower()
+    if e == "no resuelto" or s == "negativo":
+        return 1 if e == "no resuelto" else 2
+    if e == "resuelto":
+        return 4 if s != "negativo" else 3
+    if e == "pendiente":
+        return 2 if s == "negativo" else 3
     return 3
 
+
 def _assume_resuelto_por_silencio(row) -> str:
-    estado = _safe_str(row.get("estado_final",""))
-    if estado in ("Resuelto","No resuelto","Sin respuesta"):
+    estado = _safe_str(row.get("estado_final", ""))
+    if estado in ("Resuelto", "No resuelto", "Sin respuesta"):
         return estado
     try:
         far = float(row.get("first_admin_reply_at", "nan"))
@@ -409,21 +668,38 @@ def _assume_resuelto_por_silencio(row) -> str:
     if np.isnan(far):
         return estado or "Pendiente"
     if np.isnan(fcr) or (fcr - far) > (SILENCE_MINUTES_ASSUME_RESUELTO * 60):
-        if any(w in _norm_txt(row.get("resumen_qc","")) for w in ["reenvio","validacion","corregido","listo","informamos","enviado"]):
+        if any(
+            w in _norm_txt(row.get("resumen_qc", ""))
+            for w in [
+                "reenvio",
+                "validacion",
+                "corregido",
+                "listo",
+                "informamos",
+                "enviado",
+            ]
+        ):
             return "Resuelto"
     return estado or "Pendiente"
 
+
 # ===================== KPI desde campos crudos =====================
 
+
 def _to_num(df, col):
-    return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series([np.nan]*len(df))
+    return (
+        pd.to_numeric(df[col], errors="coerce")
+        if col in df.columns
+        else pd.Series([np.nan] * len(df))
+    )
+
 
 def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
-    created  = _to_num(df, "created_at")
-    closed   = _to_num(df, "closed_at")
-    far      = _to_num(df, "first_admin_reply_at")
-    fcr      = _to_num(df, "first_contact_reply_at")
-    frs      = _to_num(df, "first_response_seconds")
+    created = _to_num(df, "created_at")
+    closed = _to_num(df, "closed_at")
+    far = _to_num(df, "first_admin_reply_at")
+    fcr = _to_num(df, "first_contact_reply_at")
+    frs = _to_num(df, "first_response_seconds")
     ttr_secs = _to_num(df, "ttr_seconds")
 
     need_frs = frs.isna()
@@ -442,24 +718,27 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
     df["__ttr_seconds__"] = ttr_secs
 
     if "status" in df.columns:
-        tickets = int((df["status"].astype(str).str.lower() == "closed").sum()) or int(len(df))
+        tickets = int((df["status"].astype(str).str.lower() == "closed").sum()) or int(
+            len(df)
+        )
     else:
         tickets = int(len(df))
 
     base = int(frs.notna().sum())
-    ok = int((frs <= sla_minutes*60).sum()) if base else 0
-    tasa_1ra = (ok/base*100.0) if base else None
+    ok = int((frs <= sla_minutes * 60).sum()) if base else 0
+    tasa_1ra = (ok / base * 100.0) if base else None
 
     fr_p50 = float(np.nanmedian(frs)) if base else None
 
     if ttr_secs.notna().any():
-        ttr_mean_h = float(np.nanmean(ttr_secs))/3600.0
-        ttr_p50_h  = float(np.nanpercentile(ttr_secs.dropna(), 50))/3600.0
-        ttr_p90_h  = float(np.nanpercentile(ttr_secs.dropna(), 90))/3600.0
+        ttr_mean_h = float(np.nanmean(ttr_secs)) / 3600.0
+        ttr_p50_h = float(np.nanpercentile(ttr_secs.dropna(), 50)) / 3600.0
+        ttr_p90_h = float(np.nanpercentile(ttr_secs.dropna(), 90)) / 3600.0
     else:
         ttr_mean_h = ttr_p50_h = ttr_p90_h = None
 
-    csat = None; csat_n = 0
+    csat = None
+    csat_n = 0
     if "csat" in df.columns:
         cs = pd.to_numeric(df["csat"], errors="coerce")
         csat_n = int(cs.notna().sum())
@@ -468,7 +747,7 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
 
     return {
         "tickets_resueltos": tickets,
-        "tasa_1ra_respuesta": float(tasa_1ra) if isinstance(tasa_1ra, (int,float)) else None,
+        "tasa_1ra_respuesta": float(tasa_1ra) if isinstance(tasa_1ra, (int, float)) else None,
         "first_base": base,
         "first_ok": ok,
         "first_resp_p50_s": float(fr_p50) if isinstance(fr_p50, float) else None,
@@ -480,18 +759,24 @@ def compute_kpis_from_raw_df(df: pd.DataFrame, sla_minutes: int = 15) -> dict:
         "sla_minutes": sla_minutes,
     }
 
+
 def _fmt_min_from_sec(s):
-    if s is None: return "—"
-    return f"{int(round(s/60.0))} min"
+    if s is None:
+        return "—"
+    return f"{int(round(s / 60.0))} min"
+
 
 def _fmt_h(h):
-    if h is None: return "—"
+    if h is None:
+        return "—"
     return f"{h:.2f} h"
+
 
 # ===================== Gráficos =====================
 
+
 def _autopct_hide_small(pct):
-    return ("" if pct < 1 else f"{pct:.0f}%")
+    return "" if pct < 1 else f"{pct:.0f}%"
 
 def chart_top_issues(data, out_dir, filename="top_issues.png"):
     """
@@ -499,142 +784,223 @@ def chart_top_issues(data, out_dir, filename="top_issues.png"):
       - resumen_df con columnas ['issue','casos'], o
       - df crudo con columna 'issue_group'
     """
-    if isinstance(data, pd.DataFrame) and {"issue","casos"}.issubset(data.columns):
-        counts = (data
-                  .sort_values("casos", ascending=False)
-                  .set_index("issue")["casos"]
-                  .head(5))
+    if isinstance(data, pd.DataFrame) and {"issue", "casos"}.issubset(data.columns):
+        counts = (
+            data.sort_values("casos", ascending=False)
+            .set_index("issue")["casos"]
+            .head(5)
+        )
     else:
         counts = data["issue_group"].value_counts().head(5)
 
-    fig, ax = plt.subplots(figsize=(8,5))
+    fig, ax = plt.subplots(figsize=(8, 5))
     labels = list(counts.index)
     vals = list(counts.values)
     y = np.arange(len(labels))
     bars = ax.barh(y, vals)
-    ax.set_yticks(y); ax.set_yticklabels(labels)
-    ax.set_title("Top Issues"); ax.set_xlabel("Casos")
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.set_title("Top Issues")
+    ax.set_xlabel("Casos")
     ax.invert_yaxis()
 
     # Etiquetas con valor
     for i, b in enumerate(bars):
         w = b.get_width()
-        ax.text(w + (max(vals)*0.01 if vals else 0.3),
-                b.get_y()+b.get_height()/2,
-                f"{vals[i]}", va="center")
+        ax.text(
+            w + (max(vals) * 0.01 if vals else 0.3),
+            b.get_y() + b.get_height() / 2,
+            f"{vals[i]}",
+            va="center",
+        )
 
     p = os.path.join(out_dir, filename)
-    plt.tight_layout(); fig.savefig(p); plt.close(fig)
+    plt.tight_layout()
+    fig.savefig(p)
+    plt.close(fig)
     return p, counts
 
 
 def chart_urgencia_pie(df, out_dir):
-    counts = df["urgencia"].fillna("Sin dato").replace({"nan":"Sin dato"}).value_counts()
+    counts = df["urgencia"].fillna("Sin dato").replace({"nan": "Sin dato"}).value_counts()
     counts = counts[counts > 0]  # fuera categorías en cero
-    labels = list(counts.index); vals = list(counts.values)
-    fig, ax = plt.subplots(figsize=(6,6))
+    labels = list(counts.index)
+    vals = list(counts.values)
+    fig, ax = plt.subplots(figsize=(6, 6))
     if len(vals) == 0:
-        vals = [1]; labels = ["Sin datos"]
-    ax.pie(vals, labels=labels, autopct=_autopct_hide_small, startangle=90, pctdistance=0.75)
+        vals = [1]
+        labels = ["Sin datos"]
+    ax.pie(
+        vals,
+        labels=labels,
+        autopct=_autopct_hide_small,
+        startangle=90,
+        pctdistance=0.75,
+    )
     ax.axis("equal")
     ax.set_title("Distribución de Urgencias")
     p = os.path.join(out_dir, "urgencia_pie.png")
-    plt.tight_layout(); fig.savefig(p); plt.close(fig)
+    plt.tight_layout()
+    fig.savefig(p)
+    plt.close(fig)
     return p, counts
 
+
 def chart_sentimiento_pie(df, out_dir):
-    counts = df["sentimiento"].fillna("Sin dato").replace({"nan":"Sin dato"}).value_counts()
+    counts = (
+        df["sentimiento"].fillna("Sin dato").replace({"nan": "Sin dato"}).value_counts()
+    )
     counts = counts[counts > 0]
-    labels = list(counts.index); vals = list(counts.values)
-    fig, ax = plt.subplots(figsize=(6,6))
+    labels = list(counts.index)
+    vals = list(counts.values)
+    fig, ax = plt.subplots(figsize=(6, 6))
     if len(vals) == 0:
-        vals = [1]; labels = ["Sin datos"]
-    ax.pie(vals, labels=labels, autopct=_autopct_hide_small, startangle=90, pctdistance=0.75)
+        vals = [1]
+        labels = ["Sin datos"]
+    ax.pie(
+        vals,
+        labels=labels,
+        autopct=_autopct_hide_small,
+        startangle=90,
+        pctdistance=0.75,
+    )
     ax.axis("equal")
     ax.set_title("Distribución de Sentimientos")
     p = os.path.join(out_dir, "sentimiento_pie.png")
-    plt.tight_layout(); fig.savefig(p); plt.close(fig)
+    plt.tight_layout()
+    fig.savefig(p)
+    plt.close(fig)
     return p, counts
+
 
 def chart_urgencia_por_issue(df, out_dir):
     ct = pd.crosstab(df["issue_group"], df["urgencia"]).fillna(0).astype(int)
-    fig, ax = plt.subplots(figsize=(9,6))
+    fig, ax = plt.subplots(figsize=(9, 6))
     x = np.arange(len(ct.index))
     bottom = np.zeros(len(ct.index))
     for col in ct.columns:
         vals = ct[col].values
         ax.bar(x, vals, bottom=bottom, label=str(col))
         bottom = bottom + vals
-    ax.set_xticks(x); ax.set_xticklabels(list(ct.index), rotation=45, ha="right")
-    ax.set_title("Urgencia por Issue"); ax.set_ylabel("Casos"); ax.legend()
+    ax.set_xticks(x)
+    ax.set_xticklabels(list(ct.index), rotation=45, ha="right")
+    ax.set_title("Urgencia por Issue")
+    ax.set_ylabel("Casos")
+    ax.legend()
     p = os.path.join(out_dir, "urgencia_por_issue.png")
-    plt.tight_layout(); fig.savefig(p); plt.close(fig)
+    plt.tight_layout()
+    fig.savefig(p)
+    plt.close(fig)
     return p, ct
+
 
 def chart_canal_por_issue(df, out_dir):
     ct = pd.crosstab(df["issue_group"], df["canal"]).fillna(0).astype(int)
-    fig, ax = plt.subplots(figsize=(9,6))
+    fig, ax = plt.subplots(figsize=(9, 6))
     x = np.arange(len(ct.index))
     bottom = np.zeros(len(ct.index))
     for col in ct.columns:
         vals = ct[col].values
         ax.bar(x, vals, bottom=bottom, label=str(col))
         bottom = bottom + vals
-    ax.set_xticks(x); ax.set_xticklabels(list(ct.index), rotation=45, ha="right")
-    ax.set_title("Canal por Issue"); ax.set_ylabel("Casos"); ax.legend(ncols=2, fontsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(list(ct.index), rotation=45, ha="right")
+    ax.set_title("Canal por Issue")
+    ax.set_ylabel("Casos")
+    ax.legend(ncols=2, fontsize=8)
     p = os.path.join(out_dir, "canal_por_issue.png")
-    plt.tight_layout(); fig.savefig(p); plt.close(fig)
+    plt.tight_layout()
+    fig.savefig(p)
+    plt.close(fig)
     return p, ct
+
 
 def chart_urgencias_en_top_issues(df, out_dir, top_n=5):
     top = df["issue_group"].value_counts().head(top_n).index.tolist()
     sub = df[df["issue_group"].isin(top)].copy()
-    urg_levels = ["Alta","Media","Baja"]
-    sub["urgencia_norm"] = sub["urgencia"].fillna("Sin dato").replace({"nan":"Sin dato"}).str.title()
-    sub["urgencia_norm"] = sub["urgencia_norm"].replace({"High":"Alta","Medium":"Media","Low":"Baja"})
-    ct = pd.crosstab(sub["issue_group"], sub["urgencia_norm"]).reindex(columns=urg_levels, fill_value=0)
+    urg_levels = ["Alta", "Media", "Baja"]
+    sub["urgencia_norm"] = (
+        sub["urgencia"]
+        .fillna("Sin dato")
+        .replace({"nan": "Sin dato"})
+        .astype(str)
+        .str.title()
+    )
+    sub["urgencia_norm"] = sub["urgencia_norm"].replace(
+        {"High": "Alta", "Medium": "Media", "Low": "Baja"}
+    )
+    ct = pd.crosstab(sub["issue_group"], sub["urgencia_norm"]).reindex(
+        columns=urg_levels, fill_value=0
+    )
     idx = np.arange(len(ct.index))
     width = 0.25
-    fig, ax = plt.subplots(figsize=(9,6))
+    fig, ax = plt.subplots(figsize=(9, 6))
     for i, urg in enumerate(urg_levels):
         vals = ct[urg].values if urg in ct.columns else np.zeros(len(ct.index))
-        ax.bar(idx + (i-1)*width, vals, width=width, label=urg)
-    ax.set_xticks(idx); ax.set_xticklabels(list(ct.index), rotation=45, ha="right")
-    ax.set_title("Distribución de Urgencias en Top Issues"); ax.set_ylabel("Casos"); ax.legend()
+        ax.bar(idx + (i - 1) * width, vals, width=width, label=urg)
+    ax.set_xticks(idx)
+    ax.set_xticklabels(list(ct.index), rotation=45, ha="right")
+    ax.set_title("Distribución de Urgencias en Top Issues")
+    ax.set_ylabel("Casos")
+    ax.legend()
     p = os.path.join(out_dir, "urgencia_top_issues.png")
-    plt.tight_layout(); fig.savefig(p); plt.close(fig)
+    plt.tight_layout()
+    fig.savefig(p)
+    plt.close(fig)
     return p, ct
+
 
 def chart_ttr_box_by_urgencia(df, out_dir):
     # TTR en horas desde columna calculada/estimada
-    ttr = pd.to_numeric(df.get("__ttr_seconds__", df.get("ttr_seconds", np.nan)), errors="coerce")/3600.0
-    urg = df["urgencia"].astype(str).str.title().replace({"High":"Alta","Medium":"Media","Low":"Baja"})
+    ttr = pd.to_numeric(
+        df.get("__ttr_seconds__", df.get("ttr_seconds", np.nan)), errors="coerce"
+    ) / 3600.0
+    urg = (
+        df["urgencia"]
+        .astype(str)
+        .str.title()
+        .replace({"High": "Alta", "Medium": "Media", "Low": "Baja"})
+    )
     sub = pd.DataFrame({"ttr_h": ttr, "urg": urg}).dropna()
     sub = sub[(sub["ttr_h"] >= 0) & (sub["ttr_h"] < 96)]  # outliers extremos fuera de 4 días
-    order = ["Alta","Media","Baja"]
-    fig, ax = plt.subplots(figsize=(9,5))
+    order = ["Alta", "Media", "Baja"]
+    fig, ax = plt.subplots(figsize=(9, 5))
     data = [sub.loc[sub["urg"] == u, "ttr_h"].values for u in order]
     ax.boxplot(data, labels=order, showfliers=True)
     ax.set_title("TTR por Urgencia (horas)")
     ax.set_ylabel("Horas")
     p = os.path.join(out_dir, "ttr_por_urgencia_box.png")
-    plt.tight_layout(); fig.savefig(p); plt.close(fig)
+    plt.tight_layout()
+    fig.savefig(p)
+    plt.close(fig)
     # stats para insight/IA
     stats = {}
     for u in order:
         vals = sub.loc[sub["urg"] == u, "ttr_h"].dropna().values
         if len(vals):
-            stats[u] = {"n": int(len(vals)), "p50": float(np.percentile(vals,50)), "p90": float(np.percentile(vals,90))}
+            stats[u] = {
+                "n": int(len(vals)),
+                "p50": float(np.percentile(vals, 50)),
+                "p90": float(np.percentile(vals, 90)),
+            }
     return p, stats
 
+
 # ===================== Comparativa WoW =====================
+
 
 def compare_with_prev(issues_df: pd.DataFrame, hist_dir="./hist") -> pd.DataFrame:
     os.makedirs(hist_dir, exist_ok=True)
     today = date.today().isoformat()
-    issues_df.to_csv(os.path.join(hist_dir, f"issues_{today}.csv"), index=False, encoding="utf-8")
+    issues_df.to_csv(
+        os.path.join(hist_dir, f"issues_{today}.csv"),
+        index=False,
+        encoding="utf-8",
+    )
 
-    prevs = sorted([p for p in os.listdir(hist_dir) if p.startswith("issues_") and p.endswith(".csv")])
+    prevs = sorted(
+        [p for p in os.listdir(hist_dir) if p.startswith("issues_") and p.endswith(".csv")]
+    )
     if len(prevs) < 2:
         issues_df["wow_change_pct"] = ""
         issues_df["anomaly_flag"] = False
@@ -650,32 +1016,45 @@ def compare_with_prev(issues_df: pd.DataFrame, hist_dir="./hist") -> pd.DataFram
         delta = (casos - p) / max(p, 1) * 100.0
         return round(delta, 1), (delta >= 50.0 and casos >= 10)
 
-    issues_df["wow_change_pct"], issues_df["anomaly_flag"] = zip(*issues_df.apply(lambda r: calc(r["issue"], r["casos"]), axis=1))
+    issues_df["wow_change_pct"], issues_df["anomaly_flag"] = zip(
+        *issues_df.apply(lambda r: calc(r["issue"], r["casos"]), axis=1)
+    )
     return issues_df
+
 
 # ===================== OpenAI (API REST) + presupuesto/cache =====================
 
+
 class _AIBudget:
-    def __init__(self, budget:int):
+    def __init__(self, budget: int):
         self.budget = max(0, int(budget))
         self.rate_limited = False
+
     def take(self) -> bool:
         if self.rate_limited or self.budget <= 0:
             return False
         self.budget -= 1
         return True
 
+
 def _dataset_fingerprint(df: pd.DataFrame) -> str:
     h = hashlib.sha256()
     h.update(str(len(df)).encode())
-    counts = df["issue_group"].value_counts().to_dict() if "issue_group" in df.columns else {}
+    counts = (
+        df["issue_group"].value_counts().to_dict()
+        if "issue_group" in df.columns
+        else {}
+    )
     h.update(json.dumps(counts, sort_keys=True).encode())
     if "created_at" in df.columns:
         try:
-            h.update(str(pd.to_numeric(df["created_at"], errors="coerce").sum()).encode())
+            h.update(
+                str(pd.to_numeric(df["created_at"], errors="coerce").sum()).encode()
+            )
         except Exception:
             pass
     return h.hexdigest()[:16]
+
 
 def _load_ai_cache(cache_path: str) -> dict:
     try:
@@ -686,6 +1065,7 @@ def _load_ai_cache(cache_path: str) -> dict:
         pass
     return {}
 
+
 def _save_ai_cache(cache_path: str, cache_obj: dict):
     try:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -694,13 +1074,16 @@ def _save_ai_cache(cache_path: str, cache_obj: dict):
     except Exception:
         pass
 
-def openai_generate_text(prompt,
-                         api_key=None,
-                         model="gpt-4o-mini",
-                         temperature=0.3,
-                         max_tokens=256,
-                         retries=4,
-                         backoff=2.0):
+
+def openai_generate_text(
+    prompt,
+    api_key=None,
+    model="gpt-4o-mini",
+    temperature=0.3,
+    max_tokens=256,
+    retries=4,
+    backoff=2.0,
+):
     """
     Llama a OpenAI Chat Completions (text-only). Devuelve str o tokens de control.
     """
@@ -711,26 +1094,33 @@ def openai_generate_text(prompt,
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
+        "Authorization": f"Bearer {api_key}",
     }
     payload = {
         "model": model,
         "temperature": float(temperature),
         "max_tokens": int(max_tokens),
         "messages": [
-            {"role": "system", "content": "Eres un analista de CX. Responde en español, conciso y ejecutivo."},
-            {"role": "user", "content": str(prompt)}
-        ]
+            {
+                "role": "system",
+                "content": "Eres un analista de CX. Responde en español, conciso y ejecutivo.",
+            },
+            {"role": "user", "content": str(prompt)},
+        ],
     }
     for attempt in range(retries):
         try:
-            r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=40)
+            r = requests.post(
+                url, headers=headers, data=json.dumps(payload), timeout=40
+            )
             if r.status_code == 429:
                 print("❌ OpenAI 429 (rate limit).")
                 return "__RATE_LIMIT__"
             if r.status_code in (502, 503, 504):
                 wait = backoff ** attempt
-                print(f"❌ OpenAI {r.status_code} (overloaded). Retry {attempt+1}/{retries} en {wait:.1f}s")
+                print(
+                    f"❌ OpenAI {r.status_code} (overloaded). Retry {attempt+1}/{retries} en {wait:.1f}s"
+                )
                 time.sleep(wait)
                 continue
             if not r.ok:
@@ -745,17 +1135,23 @@ def openai_generate_text(prompt,
             print(f"❌ Excepción OpenAI: {e}")
     return "__UNAVAILABLE__"
 
+
 def _openai_smoke_test(api_key: str | None, model: str) -> None:
     if not (api_key or os.getenv("OPENAI_API_KEY")):
         print("ℹ️ OpenAI no configurado (sin API key). Insights deshabilitados.")
         return
-    txt = openai_generate_text("Responde solo: OK", api_key=api_key, model=model, max_tokens=8)
+    txt = openai_generate_text(
+        "Responde solo: OK", api_key=api_key, model=model, max_tokens=8
+    )
     if txt:
         print(f"✅ OpenAI listo. Respuesta: {txt[:50]}")
     else:
         print("⚠️ OpenAI no respondió. Verifica key, cuotas o permisos.")
 
-def ai_insight_for_chart(chart_name: str, stats_obj, api_key: str | None = None, model: str = "gpt-4o-mini") -> str:
+
+def ai_insight_for_chart(
+    chart_name: str, stats_obj, api_key: str | None = None, model: str = "gpt-4o-mini"
+) -> str:
     if isinstance(stats_obj, pd.DataFrame):
         snap = stats_obj.head(10).to_string()
     else:
@@ -770,9 +1166,14 @@ def ai_insight_for_chart(chart_name: str, stats_obj, api_key: str | None = None,
         f"2 frases máximo, español, tono ejecutivo. Datos:\n{snap}\n"
         "Formato: observación concreta + recomendación."
     )
-    return openai_generate_text(prompt, api_key=api_key, model=model, max_tokens=200)
+    return openai_generate_text(
+        prompt, api_key=api_key, model=model, max_tokens=200
+    )
 
-def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None, model: str = "gpt-4o-mini") -> dict:
+
+def ai_actions_for_issue(
+    issue: str, contexto: dict, api_key: str | None = None, model: str = "gpt-4o-mini"
+) -> dict:
     ctx_json = json.dumps(contexto, ensure_ascii=False)
     prompt = (
         f"Eres PM/Analyst en una empresa de tickets. "
@@ -781,26 +1182,31 @@ def ai_actions_for_issue(issue: str, contexto: dict, api_key: str | None = None,
         f"Contexto: {ctx_json}\n"
         "Devuelve SOLO JSON válido con claves 'Producto','Tech','CX'."
     )
-    txt = openai_generate_text(prompt, api_key=api_key, model=model, max_tokens=320)
+    txt = openai_generate_text(
+        prompt, api_key=api_key, model=model, max_tokens=320
+    )
     if txt == "__RATE_LIMIT__":
         return {"__rate_limited__": True}
     try:
         obj = json.loads(txt)
         out = {}
-        for k in ["Producto","Tech","CX"]:
+        for k in ["Producto", "Tech", "CX"]:
             if isinstance(obj.get(k), list):
                 out[k] = [str(a) for a in obj[k]][:3]
         return out
     except Exception:
         return {}
 
+
 # ===================== Publicación en GitHub (assets) =====================
+
 
 def _run_git(cmd, cwd):
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if p.returncode != 0:
         raise RuntimeError(p.stderr or p.stdout)
     return (p.stdout or "").strip()
+
 
 def _parse_remote_origin(remote_url: str):
     u = remote_url.strip()
@@ -817,15 +1223,24 @@ def _parse_remote_origin(remote_url: str):
         return parts[-2], parts[-1]
     raise ValueError(f"URL inesperada: {remote_url}")
 
-def publish_images_to_github(out_dir: str,
-                             repo_path: str,
-                             branch: str = "main",
-                             date_subdir: str | None = None,
-                             files: list[str] | None = None) -> str:
+
+def publish_images_to_github(
+    out_dir: str,
+    repo_path: str,
+    branch: str = "main",
+    date_subdir: str | None = None,
+    files: list[str] | None = None,
+) -> str:
     if files is None:
-        files = ["top_issues.png", "urgencia_pie.png", "sentimiento_pie.png",
-                 "urgencia_por_issue.png", "canal_por_issue.png", "urgencia_top_issues.png",
-                 "ttr_por_urgencia_box.png"]
+        files = [
+            "top_issues.png",
+            "urgencia_pie.png",
+            "sentimiento_pie.png",
+            "urgencia_por_issue.png",
+            "canal_por_issue.png",
+            "urgencia_top_issues.png",
+            "ttr_por_urgencia_box.png",
+        ]
     if date_subdir is None:
         date_subdir = date.today().isoformat()
 
@@ -843,148 +1258,490 @@ def publish_images_to_github(out_dir: str,
 
     _run_git(["git", "add", "."], cwd=repo_path)
     try:
-        _run_git(["git", "commit", "-m", f"Report {date_subdir}: PNG charts"], cwd=repo_path)
+        _run_git(
+            ["git", "commit", "-m", f"Report {date_subdir}: PNG charts"],
+            cwd=repo_path,
+        )
     except RuntimeError as e:
         if "nothing to commit" not in str(e).lower():
             raise
     _run_git(["git", "push", "origin", branch], cwd=repo_path)
 
-    remote = _run_git(["git", "config", "--get", "remote.origin.url"], cwd=repo_path)
+    remote = _run_git(
+        ["git", "config", "--get", "remote.origin.url"],
+        cwd=repo_path,
+    )
     owner, repo = _parse_remote_origin(remote)
-    base_raw = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/reports/{date_subdir}"
+    base_raw = (
+        f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/reports/{date_subdir}"
+    )
     return base_raw
+
 
 # ===================== Notion helpers =====================
 
-def _h1(text): return {"object":"block","type":"heading_1","heading_1":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-def _h2(text): return {"object":"block","type":"heading_2","heading_2":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-def _h3(text): return {"object":"block","type":"heading_3","heading_3":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-def _para(text): return {"object":"block","type":"paragraph","paragraph":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-def _bullet(text): return {"object":"block","type":"bulleted_list_item","bulleted_list_item":{"rich_text":[{"type":"text","text":{"content":text}}]}}
-def _todo(text, checked=False): return {"object":"block","type":"to_do","to_do":{"rich_text":[{"type":"text","text":{"content":text}}],"checked":checked}}
-def _callout(text, icon="💡"): return {"object":"block","type":"callout","callout":{"rich_text":[{"type":"text","text":{"content":text}}],"icon":{"type":"emoji","emoji":icon}}}
-def _divider(): return {"object":"block","type":"divider","divider":{}}
-def _rt(text: str): return [{"type": "text", "text": {"content": str(text)}}]
+
+def _h1(text):
+    return {
+        "object": "block",
+        "type": "heading_1",
+        "heading_1": {
+            "rich_text": [{"type": "text", "text": {"content": text}}],
+        },
+    }
+
+
+def _h2(text):
+    return {
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {
+            "rich_text": [{"type": "text", "text": {"content": text}}],
+        },
+    }
+
+
+def _h3(text):
+    return {
+        "object": "block",
+        "type": "heading_3",
+        "heading_3": {
+            "rich_text": [{"type": "text", "text": {"content": text}}],
+        },
+    }
+
+
+def _para(text):
+    return {
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [{"type": "text", "text": {"content": text}}],
+        },
+    }
+
+
+def _bullet(text):
+    return {
+        "object": "block",
+        "type": "bulleted_list_item",
+        "bulleted_list_item": {
+            "rich_text": [{"type": "text", "text": {"content": text}}],
+        },
+    }
+
+
+def _todo(text, checked=False):
+    return {
+        "object": "block",
+        "type": "to_do",
+        "to_do": {
+            "rich_text": [{"type": "text", "text": {"content": text}}],
+            "checked": checked,
+        },
+    }
+
+
+def _callout(text, icon="💡"):
+    return {
+        "object": "block",
+        "type": "callout",
+        "callout": {
+            "rich_text": [{"type": "text", "text": {"content": text}}],
+            "icon": {"type": "emoji", "emoji": icon},
+        },
+    }
+
+
+def _divider():
+    return {"object": "block", "type": "divider", "divider": {}}
+
+
+def _rt(text: str):
+    return [{"type": "text", "text": {"content": str(text)}}]
+
 
 URL_RX = re.compile(r'^https?://[^\s<>"\'\|\)\]]+$', re.IGNORECASE)
 
+
 def _clean_url(u: str) -> str | None:
-    if not isinstance(u, str): return None
+    if not isinstance(u, str):
+        return None
     u = u.strip().replace("\n", " ").replace("\r", " ")
-    if not u: return None
+    if not u:
+        return None
     u = u.split()[0].strip('\'"()[]')
-    u = ''.join(ch for ch in u if 31 < ord(ch) < 127 and ch not in {'|'})
+    u = "".join(ch for ch in u if 31 < ord(ch) < 127 and ch not in {"|"})
     if not (u.lower().startswith("http://") or u.lower().startswith("https://")):
         return None
     return u if URL_RX.match(u) else None
 
+
 def _link(text: str, url: str):
     safe = _clean_url(url)
     if not safe:
-        return {"type":"text","text":{"content":str(text)}}
-    return {"type":"text","text":{"content":str(text),"link":{"url":safe}}}
+        return {"type": "text", "text": {"content": str(text)}}
+    return {
+        "type": "text",
+        "text": {"content": str(text), "link": {"url": safe}},
+    }
+
 
 def _image_external_if_valid(url: str | None, caption: str | None = None):
     safe = _clean_url(url) if url else None
     if not safe:
         return None
-    b = {"object":"block","type":"image","image":{"type":"external","external":{"url":safe}}}
+    b = {
+        "object": "block",
+        "type": "image",
+        "image": {"type": "external", "external": {"url": safe}},
+    }
     if caption:
-        b["image"]["caption"] = [{"type":"text","text":{"content":caption}}]
+        b["image"]["caption"] = [{"type": "text", "text": {"content": caption}}]
     return b
 
+
 def _column_list(columns_children: list[list[dict]]):
-    return {"object":"block","type":"column_list","column_list":{"children":[{"object":"block","type":"column","column":{"children":ch}} for ch in columns_children]}}
+    return {
+        "object": "block",
+        "type": "column_list",
+        "column_list": {
+            "children": [
+                {
+                    "object": "block",
+                    "type": "column",
+                    "column": {"children": ch},
+                }
+                for ch in columns_children
+            ]
+        },
+    }
+
 
 def _notion_table(headers: list[str], rows: list[list[list[dict]]]):
-    table = {"object":"block","type":"table","table":{"table_width": len(headers),"has_column_header": True,"has_row_header": False,"children":[]}}
-    table["table"]["children"].append({"object":"block","type":"table_row","table_row":{"cells":[_rt(h) for h in headers]}})
+    table = {
+        "object": "block",
+        "type": "table",
+        "table": {
+            "table_width": len(headers),
+            "has_column_header": True,
+            "has_row_header": False,
+            "children": [],
+        },
+    }
+    table["table"]["children"].append(
+        {
+            "object": "block",
+            "type": "table_row",
+            "table_row": {"cells": [_rt(h) for h in headers]},
+        }
+    )
     for row in rows:
-        table["table"]["children"].append({"object":"block","type":"table_row","table_row":{"cells": row}})
+        table["table"]["children"].append(
+            {
+                "object": "block",
+                "type": "table_row",
+                "table_row": {"cells": row},
+            }
+        )
     return table
 
+
 def build_issues_table_block(resumen_df: pd.DataFrame) -> dict:
-    headers = ["Issue","Casos","Canales","Areas","Motivos","Submotivos","Ejemplos"]
+    headers = [
+        "Issue",
+        "Casos",
+        "Canales",
+        "Areas",
+        "Motivos",
+        "Submotivos",
+        "Ejemplos",
+    ]
     rows = []
     for _, r in resumen_df.sort_values("casos", ascending=False).iterrows():
-        ej_text = str(r.get("ejemplos_intercom","") or "")
-        parts = [p.strip() for p in ej_text.replace("\n"," ").split("|") if p.strip()]
+        ej_text = str(r.get("ejemplos_intercom", "") or "")
+        parts = [
+            p.strip()
+            for p in ej_text.replace("\n", " ").split("|")
+            if p.strip()
+        ]
         urls = []
         seen = set()
         for p in parts:
             u = _clean_url(p)
             if u and u not in seen:
-                urls.append(u); seen.add(u)
+                urls.append(u)
+                seen.add(u)
             if len(urls) >= 3:
                 break
-        examples_rt = [{"type":"text","text":{"content":"—"}}] if not urls else sum(
-            [[_link(f"Ejemplo {i}", u)] + ([{"type":"text","text":{"content":"  •  "}}] if i < len(urls) else []) for i,u in enumerate(urls,1)], [])
+        if not urls:
+            examples_rt = [{"type": "text", "text": {"content": "—"}}]
+        else:
+            examples_rt = []
+            for i, u in enumerate(urls, 1):
+                examples_rt.append(_link(f"Ejemplo {i}", u))
+                if i < len(urls):
+                    examples_rt.append(
+                        {"type": "text", "text": {"content": "  •  "}}
+                    )
         row_cells = [
-            _rt(r.get("issue","")),
-            _rt(str(int(r.get("casos",0) or 0))),
-            _rt(r.get("canales_top","")),
-            _rt(r.get("areas_top","")),
-            _rt(r.get("motivos_top","")),
-            _rt(r.get("submotivos_top","")),
-            examples_rt
+            _rt(r.get("issue", "")),
+            _rt(str(int(r.get("casos", 0) or 0))),
+            _rt(r.get("canales_top", "")),
+            _rt(r.get("areas_top", "")),
+            _rt(r.get("motivos_top", "")),
+            _rt(r.get("submotivos_top", "")),
+            examples_rt,
         ]
         rows.append(row_cells)
     return _notion_table(headers, rows)
 
+
 ACTION_LIBRARY = {
     "Pagos / cobros": {
-        "Producto": ["Mostrar causa de rechazo y reintentos guiados.","Guardar tarjeta segura (1-click)."],
-        "Tech": ["Logs de PSP + alertas por BIN/issuer.","Retries con backoff en fallas de red."],
-        "CX": ["Macro paso a paso por medio de pago.","Comunicar reserva temporal."]
+        "Producto": [
+            "Mostrar causa de rechazo y reintentos guiados.",
+            "Guardar tarjeta segura (1-click).",
+        ],
+        "Tech": [
+            "Logs de PSP + alertas por BIN/issuer.",
+            "Retries con backoff en fallas de red.",
+        ],
+        "CX": [
+            "Macro paso a paso por medio de pago.",
+            "Comunicar reserva temporal.",
+        ],
     },
     "Entrega de entradas": {
         "Producto": ["CTA visible para reenvío y confirmación en UI."],
-        "Tech": ["Job idempotente de reenvío.","Monitoreo de bounce/spam."],
-        "CX": ["Bot autogestivo de reenvío por mail/WhatsApp."]
+        "Tech": ["Job idempotente de reenvío.", "Monitoreo de bounce/spam."],
+        "CX": ["Bot autogestivo de reenvío por mail/WhatsApp."],
     },
     "QR / Validación en acceso": {
-        "Producto": ["Feedback claro de estado del QR (válido/usado/bloqueado)."],
+        "Producto": [
+            "Feedback claro de estado del QR (válido/usado/bloqueado)."
+        ],
         "Tech": ["Telemetría de validadores + health checks."],
-        "CX": ["Guía de acceso y resolución de errores comunes."]
+        "CX": ["Guía de acceso y resolución de errores comunes."],
     },
     "Transferencia / titularidad": {
         "Producto": ["Flujo guiado de cambio de titularidad con confirmación."],
         "Tech": ["Auditoría/registro de transferencias."],
-        "CX": ["Macro con costos/plazos y límites."]
+        "CX": ["Macro con costos/plazos y límites."],
     },
     "Reembolso / devolución": {
         "Producto": ["Estado visible del reembolso y tiempos estimados."],
         "Tech": ["Idempotencia + conciliación con PSP."],
-        "CX": ["Macro de seguimiento y expectativas."]
-    }
+        "CX": ["Macro de seguimiento y expectativas."],
+    },
 }
 
-def actions_for_issue(issue: str):
-    return ACTION_LIBRARY.get(issue, {
-        "Producto": ["Quick wins de UX para reducir fricción."],
-        "Tech": ["Registrar error types + tracing/dashboards."],
-        "CX": ["Macro de contención + FAQ específica."]
-    })
 
-def build_actions_section_blocks(resumen_df: pd.DataFrame, top_n: int = 5, acciones_ai: dict | None = None) -> list[dict]:
+def actions_for_issue(issue: str):
+    return ACTION_LIBRARY.get(
+        issue,
+        {
+            "Producto": ["Quick wins de UX para reducir fricción."],
+            "Tech": ["Registrar error types + tracing/dashboards."],
+            "CX": ["Macro de contención + FAQ específica."],
+        },
+    )
+
+
+def build_actions_section_blocks(
+    resumen_df: pd.DataFrame,
+    top_n: int = 5,
+    acciones_ai: dict | None = None,
+) -> list[dict]:
     blocks = []
     blocks.append(_h2("Acciones A Evaluar"))
     for _, r in resumen_df.sort_values("casos", ascending=False).head(top_n).iterrows():
-        issue = str(r.get("issue",""))
-        casos = int(r.get("casos",0) or 0)
+        issue = str(r.get("issue", ""))
+        casos = int(r.get("casos", 0) or 0)
         blocks.append(_h3(f"{issue} ({casos})"))
         base = actions_for_issue(issue)
         ai_extra = acciones_ai.get(issue, {}) if acciones_ai else {}
-        col_prod = [ _para("Producto:") ] + [ _todo(a) for a in base.get("Producto", []) + ai_extra.get("Producto", []) ]
-        col_tech = [ _para("Tech:") ]     + [ _todo(a) for a in base.get("Tech", []) + ai_extra.get("Tech", []) ]
-        col_cx   = [ _para("CX:") ]       + [ _todo(a) for a in base.get("CX", []) + ai_extra.get("CX", []) ]
+        col_prod = [_para("Producto:")] + [
+            _todo(a) for a in base.get("Producto", []) + ai_extra.get("Producto", [])
+        ]
+        col_tech = [_para("Tech:")] + [
+            _todo(a) for a in base.get("Tech", []) + ai_extra.get("Tech", [])
+        ]
+        col_cx = [_para("CX:")] + [
+            _todo(a) for a in base.get("CX", []) + ai_extra.get("CX", [])
+        ]
         blocks.append(_column_list([col_prod, col_tech, col_cx]))
     return blocks
 
+
+# =============== NUEVO: Resumen & accionables por área ===============
+
+
+def summarize_issues_by_area(
+    df: pd.DataFrame,
+    areas_focus: list[str] | None = None,
+    top_n_per_area: int = 5,
+) -> dict[str, pd.DataFrame]:
+    """
+    Devuelve {area: DataFrame[issue, casos, pct_area, ttr_p50_h, csat_mean]}.
+    Usa __ttr_seconds__ calculado y csat.
+    """
+    d = {}
+    base = df.copy()
+    base["area"] = base["area"].astype(str).str.strip()
+    base["__ttr_h__"] = (
+        pd.to_numeric(
+            base.get("__ttr_seconds__", base.get("ttr_seconds", np.nan)),
+            errors="coerce",
+        )
+        / 3600.0
+    )
+    base["__ttr_h__"] = base["__ttr_h__"].where(
+        (base["__ttr_h__"] >= 0) & (base["__ttr_h__"] < 96)
+    )  # cap 4 días
+    base["__csat_num__"] = pd.to_numeric(base.get("csat"), errors="coerce")
+
+    if areas_focus:
+        base = base[base["area"].isin(areas_focus)]
+
+    for area, g in base.groupby("area"):
+        if not len(g):
+            continue
+        total_area = len(g)
+        agg = (
+            g.groupby("issue_group", as_index=False)
+            .agg(
+                casos=("issue_group", "size"),
+                ttr_p50_h=(
+                    "__ttr_h__",
+                    lambda x: float(np.nanpercentile(x.dropna(), 50))
+                    if x.notna().any()
+                    else np.nan,
+                ),
+                csat_mean=(
+                    "__csat_num__",
+                    lambda x: round(float(np.nanmean(x)), 2)
+                    if x.notna().any()
+                    else np.nan,
+                ),
+            )
+            .rename(columns={"issue_group": "issue"})
+            .sort_values("casos", ascending=False)
+        )
+        if not len(agg):
+            continue
+        agg["pct_area"] = (agg["casos"] / total_area * 100).round(1)
+        d[area] = agg.head(top_n_per_area)
+    return d
+
+
+def _fmt(v, suf=""):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "—"
+    if not isinstance(v, float):
+        return f"{v}{suf}"
+    if suf == "%":
+        return f"{v:.1f}{suf}"
+    if "h" in suf:
+        return f"{v:.2f}{suf}"
+    return f"{v:.2f}"
+
+
+def build_area_tables_blocks(area_summaries: dict[str, pd.DataFrame]) -> list[dict]:
+    """
+    Crea H2 + tablas por área con columnas: Issue | Casos | % del área | TTR p50 (h) | CSAT
+    """
+    blocks = []
+    if not area_summaries:
+        return blocks
+    blocks.append(_h2("Issues por área (Top)"))
+    for area in sorted(area_summaries.keys()):
+        df_area = area_summaries[area]
+        blocks.append(_h3(area))
+        headers = ["Issue", "Casos", "% del área", "TTR p50 (h)", "CSAT"]
+        rows = []
+        for _, r in df_area.iterrows():
+            rows.append(
+                [
+                    _rt(str(r.get("issue", ""))),
+                    _rt(str(int(r.get("casos", 0) or 0))),
+                    _rt(_fmt(r.get("pct_area"), "%")),
+                    _rt(_fmt(r.get("ttr_p50_h"), " h")),
+                    _rt(_fmt(r.get("csat_mean"))),
+                ]
+            )
+        blocks.append(_notion_table(headers, rows))
+    return blocks
+
+
+def build_area_actions_blocks(
+    area_summaries: dict[str, pd.DataFrame],
+    acciones_ai_por_issue: dict | None = None,
+    only_areas: list[str] | None = None,
+    max_issues_per_area: int = 3,
+) -> list[dict]:
+    """
+    Para cada área (por defecto solo 'CX' y 'Customer Success' si existen),
+    arma una lista de to-dos tomando ACTION_LIBRARY + IA por issue superior del área.
+    """
+    if acciones_ai_por_issue is None:
+        acciones_ai_por_issue = {}
+    if only_areas is None:
+        only_areas = ["CX", "Customer Success"]
+
+    blocks = []
+    pick_areas = [a for a in only_areas if a in area_summaries]
+    if not pick_areas:
+        return blocks
+
+    blocks.append(_h2("Accionables por área (CX y CS)"))
+    for area in pick_areas:
+        blocks.append(_h3(area))
+        df_area = area_summaries[area].head(max_issues_per_area)
+        # column layout: Producto | Tech | CX
+        col_prod = [_para("Producto:")]
+        col_tech = [_para("Tech:")]
+        col_cx = [_para("CX:")]
+
+        for _, r in df_area.iterrows():
+            issue = str(r.get("issue", ""))
+            base = actions_for_issue(issue)  # de ACTION_LIBRARY
+            ai_extra = acciones_ai_por_issue.get(issue, {})  # si ya existe del bloque global
+
+            # Encabezado mini por issue dentro de cada columna:
+            title_token = f"[{issue}]"
+
+            # Producto
+            col_prod.append(_para(title_token))
+            for a in base.get("Producto", []):
+                col_prod.append(_todo(a))
+            for a in ai_extra.get("Producto", []):
+                col_prod.append(_todo(a))
+
+            # Tech
+            col_tech.append(_para(title_token))
+            for a in base.get("Tech", []):
+                col_tech.append(_todo(a))
+            for a in ai_extra.get("Tech", []):
+                col_tech.append(_todo(a))
+
+            # CX
+            col_cx.append(_para(title_token))
+            for a in base.get("CX", []):
+                col_cx.append(_todo(a))
+            for a in ai_extra.get("CX", []):
+                col_cx.append(_todo(a))
+
+        blocks.append(_column_list([col_prod, col_tech, col_cx]))
+    return blocks
+
+
 # -------- sanitizador transversal de links --------
+
 
 def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
     blks = json.loads(json.dumps(blocks))
+
     def strip_or_fix_rt(rt_list):
         for tkn in rt_list:
             if tkn.get("type") == "text":
@@ -996,9 +1753,18 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
                     else:
                         tkn["text"]["link"]["url"] = safe
         return rt_list
+
     for b in blks:
         t = b.get("type")
-        if t in ("paragraph","bulleted_list_item","to_do","heading_1","heading_2","heading_3","callout"):
+        if t in (
+            "paragraph",
+            "bulleted_list_item",
+            "to_do",
+            "heading_1",
+            "heading_2",
+            "heading_3",
+            "callout",
+        ):
             if t in b and "rich_text" in b[t]:
                 b[t]["rich_text"] = strip_or_fix_rt(b[t]["rich_text"])
         elif t == "table":
@@ -1008,14 +1774,19 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
                     cells[i] = strip_or_fix_rt(cell)
         elif t == "image":
             img = b.get("image", {})
-            if img.get("type") == "external" and "external" in img and "url" in img["external"]:
+            if (
+                img.get("type") == "external"
+                and "external" in img
+                and "url" in img["external"]
+            ):
                 safe = _clean_url(img["external"]["url"])
                 if not safe:
                     caption = ""
                     cap_rt = img.get("caption") or []
                     if cap_rt and cap_rt[0].get("type") == "text":
-                        caption = cap_rt[0]["text"].get("content","")
-                    b.clear(); b.update(_para(caption or ""))
+                        caption = cap_rt[0]["text"].get("content", "")
+                    b.clear()
+                    b.update(_para(caption or ""))
                 else:
                     img["external"]["url"] = safe
             cap = img.get("caption", [])
@@ -1023,11 +1794,14 @@ def _sanitize_links_in_blocks(blocks: list[dict]) -> list[dict]:
                 b["image"]["caption"] = strip_or_fix_rt(cap)
     return blks
 
+
 # ---------- KPIs UI helpers ----------
+
 
 def _metric_card(title: str, value: str, sub: str = "", icon: str = "📊") -> dict:
     text = f"{title}: {value}" if not sub else f"{title}: {value}\n{sub}"
     return _callout(text, icon=icon)
+
 
 def build_kpi_section_blocks(kpis: dict | None, total_items: int) -> list[dict]:
     blocks = []
@@ -1036,14 +1810,16 @@ def build_kpi_section_blocks(kpis: dict | None, total_items: int) -> list[dict]:
         blocks.append(_para("—"))
         return blocks
 
-    tickets = str(kpis.get("tickets_resueltos","—"))
+    tickets = str(kpis.get("tickets_resueltos", "—"))
     pct_val = kpis.get("tasa_1ra_respuesta", None)
-    pct = f"{pct_val:.0f}%" if isinstance(pct_val, (int,float)) else "—"
-    base = kpis.get("first_base", 0); ok = kpis.get("first_ok", 0)
+    pct = f"{pct_val:.0f}%" if isinstance(pct_val, (int, float)) else "—"
+    base = kpis.get("first_base", 0)
+    ok = kpis.get("first_ok", 0)
     ttr_mean = _fmt_h(kpis.get("ttr_horas"))
-    ttr_p50  = _fmt_h(kpis.get("ttr_p50_h"))
-    ttr_p90  = _fmt_h(kpis.get("ttr_p90_h"))
-    csat = kpis.get("csat", None); csn = kpis.get("csat_n",0)
+    ttr_p50 = _fmt_h(kpis.get("ttr_p50_h"))
+    ttr_p90 = _fmt_h(kpis.get("ttr_p90_h"))
+    csat = kpis.get("csat", None)
+    csn = kpis.get("csat_n", 0)
     csat_txt = "—" if csat is None else f"{csat:.2f}"
     sla = kpis.get("sla_minutes", 15)
 
@@ -1056,57 +1832,115 @@ def build_kpi_section_blocks(kpis: dict | None, total_items: int) -> list[dict]:
     blocks.append(_column_list([c for c in row1]))
     return blocks
 
+
 def build_kpi_glossary_blocks(kpis: dict | None, total_items: int) -> list[dict]:
     if not kpis:
         return []
     pct_val = kpis.get("tasa_1ra_respuesta", None)
-    pct = f"{pct_val:.0f}%" if isinstance(pct_val, (int,float)) else "—"
-    base = kpis.get("first_base", 0); ok = kpis.get("first_ok", 0)
+    pct = f"{pct_val:.0f}%" if isinstance(pct_val, (int, float)) else "—"
+    base = kpis.get("first_base", 0)
+    ok = kpis.get("first_ok", 0)
     med_first = _fmt_min_from_sec(kpis.get("first_resp_p50_s"))
     ttr_mean = _fmt_h(kpis.get("ttr_horas"))
-    ttr_p50  = _fmt_h(kpis.get("ttr_p50_h"))
-    ttr_p90  = _fmt_h(kpis.get("ttr_p90_h"))
-    csat = kpis.get("csat", None); csn = kpis.get("csat_n",0)
+    ttr_p50 = _fmt_h(kpis.get("ttr_p50_h"))
+    ttr_p90 = _fmt_h(kpis.get("ttr_p90_h"))
+    csat = kpis.get("csat", None)
+    csn = kpis.get("csat_n", 0)
     csat_txt = "—" if csat is None else f"{csat:.2f}"
     blocks = []
     blocks.append(_h2("Cómo leer los KPIs"))
     # Tickets resueltos
     blocks.append(_h3("🎟️ Tickets resueltos"))
-    blocks.append(_bullet(f"**{kpis.get('tickets_resueltos','—')}** → son las conversaciones que efectivamente se cerraron con resolución."))
-    blocks.append(_bullet(f"**{total_items} procesadas** → es el total de conversaciones analizadas (algunas quedaron abiertas, duplicadas o fuera de alcance)."))
-    blocks.append(_para("👉 Este número muestra el **volumen de trabajo resuelto** frente al total que entró."))
+    blocks.append(
+        _bullet(
+            f"**{kpis.get('tickets_resueltos','—')}** → son las conversaciones que efectivamente se cerraron con resolución."
+        )
+    )
+    blocks.append(
+        _bullet(
+            f"**{total_items} procesadas** → es el total de conversaciones analizadas (algunas quedaron abiertas, duplicadas o fuera de alcance)."
+        )
+    )
+    blocks.append(
+        _para(
+            "👉 Este número muestra el **volumen de trabajo resuelto** frente al total que entró."
+        )
+    )
     # % primera respuesta
     blocks.append(_h3("⚡ % 1ra respuesta en SLA"))
-    blocks.append(_bullet(f"**{pct} ({ok}/{base})** → conversaciones con **primera respuesta** dentro del SLA."))
-    blocks.append(_bullet(f"**SLA {kpis.get('sla_minutes',15)} min** → compromiso de contestar dentro de 15 minutos."))
-    blocks.append(_bullet(f"**Mediana {med_first}** → la mayoría de las veces la primera respuesta fue **inmediata**."))
-    blocks.append(_para("👉 Este KPI mide la **velocidad de reacción inicial** del equipo."))
+    blocks.append(
+        _bullet(
+            f"**{pct} ({ok}/{base})** → conversaciones con **primera respuesta** dentro del SLA."
+        )
+    )
+    blocks.append(
+        _bullet(
+            f"**SLA {kpis.get('sla_minutes',15)} min** → compromiso de contestar dentro de 15 minutos."
+        )
+    )
+    blocks.append(
+        _bullet(
+            f"**Mediana {med_first}** → la mayoría de las veces la primera respuesta fue **inmediata**."
+        )
+    )
+    blocks.append(
+        _para(
+            "👉 Este KPI mide la **velocidad de reacción inicial** del equipo."
+        )
+    )
     # TTR
     blocks.append(_h3("⏱️ TTR (Time To Resolution)"))
-    blocks.append(_bullet(f"**Promedio: {ttr_mean}** → tiempo promedio hasta la resolución."))
-    blocks.append(_bullet(f"**p50 ({ttr_p50})** → 50% de los tickets se resuelven por debajo de la mediana."))
-    blocks.append(_bullet(f"**p90 ({ttr_p90})** → 90% se resuelve por debajo de este valor."))
-    blocks.append(_para("👉 El TTR muestra la **distribución de los tiempos**: la mayoría se resuelve rápido, pero algunos casos largos suben el promedio."))
+    blocks.append(
+        _bullet(f"**Promedio: {ttr_mean}** → tiempo promedio hasta la resolución.")
+    )
+    blocks.append(
+        _bullet(
+            f"**p50 ({ttr_p50})** → 50% de los tickets se resuelven por debajo de la mediana."
+        )
+    )
+    blocks.append(
+        _bullet(
+            f"**p90 ({ttr_p90})** → 90% se resuelve por debajo de este valor."
+        )
+    )
+    blocks.append(
+        _para(
+            "👉 El TTR muestra la **distribución de los tiempos**: la mayoría se resuelve rápido, pero algunos casos largos suben el promedio."
+        )
+    )
     # CSAT
     blocks.append(_h3("⭐ CSAT (Customer Satisfaction)"))
-    blocks.append(_bullet(f"**{csat_txt} (n={csn})** → promedio de satisfacción de clientes (sobre 5)."))
+    blocks.append(
+        _bullet(
+            f"**{csat_txt} (n={csn})** → promedio de satisfacción de clientes (sobre 5)."
+        )
+    )
     blocks.append(_bullet(f"**n={csn}** → cantidad de respuestas válidas."))
-    blocks.append(_para("👉 Refleja la **percepción del cliente**. Un valor < 3 indica **espacio de mejora**."))
+    blocks.append(
+        _para(
+            "👉 Refleja la **percepción del cliente**. Un valor < 3 indica **espacio de mejora**."
+        )
+    )
     return blocks
+
 
 # ===================== Página Notion =====================
 
-def notion_create_page(parent_page_id: str,
-                       token: str,
-                       page_title: str,
-                       df: pd.DataFrame,
-                       resumen_df: pd.DataFrame,
-                       meta: dict,
-                       chart_urls: dict,
-                       insights: dict,
-                       acciones_ai: dict | None = None,
-                       kpis: dict | None = None,
-                       top_counts_series: pd.Series | None = None):
+
+def notion_create_page(
+    parent_page_id: str,
+    token: str,
+    page_title: str,
+    df: pd.DataFrame,
+    resumen_df: pd.DataFrame,
+    meta: dict,
+    chart_urls: dict,
+    insights: dict,
+    acciones_ai: dict | None = None,
+    kpis: dict | None = None,
+    top_counts_series: pd.Series | None = None,
+    area_summaries: dict[str, pd.DataFrame] | None = None,
+):
     blocks = []
     blocks.append(_h1(page_title))
 
@@ -1115,8 +1949,17 @@ def notion_create_page(parent_page_id: str,
     blocks.append(_para(f"📅 Fecha del análisis: {meta.get('fecha','')}"))
     blocks.append(_para(f"📂 Fuente de datos: {meta.get('fuente','')}"))
     blocks.append(_para(f"💬 Conversaciones procesadas: {meta.get('total','')}"))
-    blocks.append(_para("Durante el periodo analizado se registraron conversaciones en Intercom, procesadas por IA para identificar patrones, problemas recurrentes y oportunidades de mejora."))
-    blocks.append(_callout("Foco de la semana: reducir TTR p50 en Top-2 issues (-20% en 14 días) y +0.2 CSAT.", icon="🎯"))
+    blocks.append(
+        _para(
+            "Durante el periodo analizado se registraron conversaciones en Intercom, procesadas por IA para identificar patrones, problemas recurrentes y oportunidades de mejora."
+        )
+    )
+    blocks.append(
+        _callout(
+            "Foco de la semana: reducir TTR p50 en Top-2 issues (-20% en 14 días) y +0.2 CSAT.",
+            icon="🎯",
+        )
+    )
 
     # KPIs (cards) + glosario
     blocks.extend(build_kpi_section_blocks(kpis, total_items=len(df)))
@@ -1132,8 +1975,8 @@ def notion_create_page(parent_page_id: str,
     else:
         total_len = max(len(df), 1)
         for _, r in top3_rows.iterrows():
-            issue = str(r.get("issue",""))
-            casos = int(r.get("casos",0) or 0)
+            issue = str(r.get("issue", ""))
+            casos = int(r.get("casos", 0) or 0)
             pct_issue = f"{(casos/total_len*100):.0f}%"
             blocks.append(_bullet(f"{issue} → {casos} casos ({pct_issue})"))
 
@@ -1159,7 +2002,9 @@ def notion_create_page(parent_page_id: str,
 
     # Tema
     blocks.append(_h3("Tema"))
-    tema_series = df["tema_norm"].fillna("").replace({"nan": ""}).astype(str).str.strip()
+    tema_series = (
+        df["tema_norm"].fillna("").replace({"nan": ""}).astype(str).str.strip()
+    )
     tema_vc = tema_series[tema_series != ""].value_counts().head(5)
     if len(tema_vc) == 0:
         blocks.append(_para("—"))
@@ -1169,7 +2014,9 @@ def notion_create_page(parent_page_id: str,
 
     # Motivo
     blocks.append(_h3("Motivo"))
-    motivo_series = df["motivo_norm"].fillna("").replace({"nan": ""}).astype(str).str.strip()
+    motivo_series = (
+        df["motivo_norm"].fillna("").replace({"nan": ""}).astype(str).str.strip()
+    )
     motivo_vc = motivo_series[motivo_series != ""].value_counts().head(5)
     if len(motivo_vc) == 0:
         blocks.append(_para("—"))
@@ -1181,16 +2028,29 @@ def notion_create_page(parent_page_id: str,
     blocks.append(_h2("Issues Detallados"))
     blocks.append(build_issues_table_block(resumen_df))
 
-    # Acciones a evaluar
-    blocks.extend(build_actions_section_blocks(resumen_df, top_n=5, acciones_ai=acciones_ai))
+    # ===== NUEVO: Issues por área + Accionables por área =====
+    if area_summaries:
+        blocks.extend(build_area_tables_blocks(area_summaries))
+        blocks.extend(
+            build_area_actions_blocks(
+                area_summaries, acciones_ai_por_issue=acciones_ai
+            )
+        )
+
+    # Acciones a evaluar (Top issues globales)
+    blocks.extend(
+        build_actions_section_blocks(resumen_df, top_n=5, acciones_ai=acciones_ai)
+    )
 
     # Sanitizado final de enlaces
     safe_children = _sanitize_links_in_blocks(blocks)
 
     payload = {
         "parent": {"type": "page_id", "page_id": parent_page_id},
-        "properties": {"title": {"title": [{"text": {"content": page_title}}]}},
-        "children": safe_children
+        "properties": {
+            "title": {"title": [{"text": {"content": page_title}}]},
+        },
+        "children": safe_children,
     }
 
     resp = requests.post(
@@ -1198,33 +2058,54 @@ def notion_create_page(parent_page_id: str,
         headers={
             "Authorization": f"Bearer {token}",
             "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         },
-        data=json.dumps(payload)
+        data=json.dumps(payload),
     )
 
     # Retry sin links si Notion protesta por URLs inválidas
-    if not resp.ok and ("Invalid URL" in (resp.text or "") or "link" in (resp.text or "").lower()):
+    if not resp.ok and (
+        "Invalid URL" in (resp.text or "")
+        or "link" in (resp.text or "").lower()
+    ):
+
         def strip_all_links(blks: list[dict]) -> list[dict]:
             blks = json.loads(json.dumps(blks))
             for b in blks:
                 t = b.get("type")
-                if t in ("paragraph", "bulleted_list_item", "to_do", "heading_1", "heading_2", "heading_3", "callout"):
+                if t in (
+                    "paragraph",
+                    "bulleted_list_item",
+                    "to_do",
+                    "heading_1",
+                    "heading_2",
+                    "heading_3",
+                    "callout",
+                ):
                     rt = b.get(t, {}).get("rich_text", [])
                     for tkn in rt:
-                        if tkn.get("type") == "text" and tkn.get("text", {}).get("link"):
+                        if (
+                            tkn.get("type") == "text"
+                            and tkn.get("text", {}).get("link")
+                        ):
                             tkn["text"]["link"] = None
                 elif t == "table":
                     for row in b.get("table", {}).get("children", []):
                         cells = row.get("table_row", {}).get("cells", [])
                         for cell in cells:
                             for tkn in cell:
-                                if tkn.get("type") == "text" and tkn.get("text", {}).get("link"):
+                                if (
+                                    tkn.get("type") == "text"
+                                    and tkn.get("text", {}).get("link")
+                                ):
                                     tkn["text"]["link"] = None
                 elif t == "image":
                     cap = b.get("image", {}).get("caption", [])
                     for tkn in cap:
-                        if tkn.get("type") == "text" and tkn.get("text", {}).get("link"):
+                        if (
+                            tkn.get("type") == "text"
+                            and tkn.get("text", {}).get("link")
+                        ):
                             tkn["text"]["link"] = None
             return blks
 
@@ -1235,69 +2116,98 @@ def notion_create_page(parent_page_id: str,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Notion-Version": "2022-06-28",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             },
-            data=json.dumps(payload_retry)
+            data=json.dumps(payload_retry),
         )
 
     if not resp.ok:
         raise RuntimeError(f"Notion error {resp.status_code}: {resp.text}")
     return resp.json()
 
+
 # ===================== Core =====================
 
-def _fallback_insights(insights: dict,
-                       top_counts: pd.Series,
-                       urg_counts: pd.Series,
-                       sent_counts: pd.Series,
-                       ttr_urg_stats: dict):
+
+def _fallback_insights(
+    insights: dict,
+    top_counts: pd.Series,
+    urg_counts: pd.Series,
+    sent_counts: pd.Series,
+    ttr_urg_stats: dict,
+):
     """Genera insights determinísticos cuando no hay IA, incluyendo el foquito de TTR por urgencia."""
     if "top_issues" not in insights and len(top_counts):
         issue0, n0 = top_counts.index[0], int(top_counts.iloc[0])
-        insights["top_issues"] = f"El principal problema es {issue0} ({n0} casos). Priorizar fixes para reducir volumen y TTR."
+        insights["top_issues"] = (
+            f"El principal problema es {issue0} ({n0} casos). "
+            f"Priorizar fixes para reducir volumen y TTR."
+        )
 
     if "urgencia_pie" not in insights and len(urg_counts):
-        alta = int(urg_counts.get("Alta", 0)); media = int(urg_counts.get("Media", 0))
+        alta = int(urg_counts.get("Alta", 0))
+        media = int(urg_counts.get("Media", 0))
         tot = int(urg_counts.sum() or 1)
-        insights["urgencia_pie"] = f"El {round(100*(alta+media)/tot)}% de los tickets son Alta/Media. Asegurar priorización y SLAs."
+        insights["urgencia_pie"] = (
+            f"El {round(100*(alta+media)/tot)}% de los tickets son Alta/Media. "
+            f"Asegurar priorización y SLAs."
+        )
 
     if "sentimiento_pie" not in insights and len(sent_counts):
-        neg = int(sent_counts.get("Negativo", 0)); tot = int(sent_counts.sum() or 1)
+        neg = int(sent_counts.get("Negativo", 0))
+        tot = int(sent_counts.sum() or 1)
         if neg:
-            insights["sentimiento_pie"] = f"El {round(100*neg/tot)}% de los tickets reflejan sentimiento negativo. Revisar comunicación y tiempos."
+            insights["sentimiento_pie"] = (
+                f"El {round(100*neg/tot)}% de los tickets "
+                f"reflejan sentimiento negativo. Revisar comunicación y tiempos."
+            )
 
     if "ttr_por_urgencia_box" not in insights and ttr_urg_stats:
         def fmt(h):
-            return f"{h:.1f} h" if isinstance(h, (int,float)) else "—"
-        p50_alt = ttr_urg_stats.get("Alta",{}).get("p50")
-        p50_med = ttr_urg_stats.get("Media",{}).get("p50")
-        p50_baj = ttr_urg_stats.get("Baja",{}).get("p50")
+            return f"{h:.1f} h" if isinstance(h, (int, float)) else "—"
+
+        p50_alt = ttr_urg_stats.get("Alta", {}).get("p50")
+        p50_med = ttr_urg_stats.get("Media", {}).get("p50")
+        p50_baj = ttr_urg_stats.get("Baja", {}).get("p50")
         insights["ttr_por_urgencia_box"] = (
-            f"TTR mediano — Alta: {fmt(p50_alt)}, Media: {fmt(p50_med)}, Baja: {fmt(p50_baj)}. "
+            f"TTR mediano — Alta: {fmt(p50_alt)}, Media: {fmt(p50_med)}, "
+            f"Baja: {fmt(p50_baj)}. "
             f"Objetivo: bajar p50 en 'Media' (y mantener 'Alta' < 'Media')."
         )
     return insights
 
-def run(csv_path: str,
-        out_dir: str,
-        notion_token: str | None,
-        notion_parent: str | None,
-        publish_github: bool = False,
-        github_repo_path: str | None = None,
-        github_branch: str = "main",
-        assets_base_url: str | None = None,
-        openai_api_key: str | None = None,
-        openai_model: str = "gpt-4o-mini",
-        sla_first_reply_min: int = 15,
-        ai_mode: str = "full",
-        ai_budget: int = 100):
 
+def run(
+    csv_path: str,
+    out_dir: str,
+    notion_token: str | None,
+    notion_parent: str | None,
+    publish_github: bool = False,
+    github_repo_path: str | None = None,
+    github_branch: str = "main",
+    assets_base_url: str | None = None,
+    openai_api_key: str | None = None,
+    openai_model: str = "gpt-4o-mini",
+    sla_first_reply_min: int = 15,
+    ai_mode: str = "full",
+    ai_budget: int = 100,
+    areas_focus_str: str | None = None,
+):
     os.makedirs(out_dir, exist_ok=True)
 
     # Lectura + normalización + taxonomías
     df = load_csv_robusto(csv_path)
     df = normalize_columns(df)
-    for col in ["tema","motivo","submotivo","urgencia","canal","area","sentimiento","categoria"]:
+    for col in [
+        "tema",
+        "motivo",
+        "submotivo",
+        "urgencia",
+        "canal",
+        "area",
+        "sentimiento",
+        "categoria",
+    ]:
         if col in df.columns:
             df[col] = df[col].astype(object)
     df = enforce_taxonomy(df)
@@ -1305,7 +2215,10 @@ def run(csv_path: str,
     # Consolidaciones
     df["csat_num"] = df.apply(pick_csats, axis=1)
     if "csat" in df.columns:
-        df["csat"] = df["csat"].where(pd.to_numeric(df["csat"], errors="coerce").between(1,5), df["csat_num"])
+        df["csat"] = df["csat"].where(
+            pd.to_numeric(df["csat"], errors="coerce").between(1, 5),
+            df["csat_num"],
+        )
     else:
         df["csat"] = df["csat_num"]
 
@@ -1321,21 +2234,40 @@ def run(csv_path: str,
             df[c] = df[c].astype(object).where(~pd.isna(df[c]), "")
 
     df["issue_group"] = df.apply(
-        lambda r: choose_issue(r.get("motivo_norm"), r.get("submotivo_norm"), r.get("texto_base")),
-        axis=1
+        lambda r: choose_issue(
+            r.get("motivo_norm"),
+            r.get("submotivo_norm"),
+            r.get("texto_base"),
+        ),
+        axis=1,
     )
 
     # Quality gate
-    df["resumen_qc"] = df.apply(lambda r: r["resumen_ia"] if not _is_vague_summary(r.get("resumen_ia","")) else _enrich_summary(r), axis=1)
-    df["insight_qc"] = df.apply(lambda r: r["insight_ia"] if not _is_vague_insight(r.get("insight_ia","")) else _enrich_insight(r), axis=1)
+    df["resumen_qc"] = df.apply(
+        lambda r: r["resumen_ia"]
+        if not _is_vague_summary(r.get("resumen_ia", ""))
+        else _enrich_summary(r),
+        axis=1,
+    )
+    df["insight_qc"] = df.apply(
+        lambda r: r["insight_ia"]
+        if not _is_vague_insight(r.get("insight_ia", ""))
+        else _enrich_insight(r),
+        axis=1,
+    )
 
     # Anti "trío vago" (solo interno; no se imprime en Notion)
-    mask_trio = (df["sentimiento"].astype(str).str.lower().eq("neutro")) & \
-                (df["urgencia"].astype(str).str.lower().eq("media")) & \
-                (df["csat"].astype(str).eq("3"))
-    df.loc[mask_trio, "sentimiento"] = df.loc[mask_trio, "texto_base"].map(_sent_rule)
-    df.loc[mask_trio, "urgencia"]    = df.loc[mask_trio, "texto_base"].map(_urg_rule)
-    df.loc[mask_trio, "csat"]        = df.loc[mask_trio].apply(lambda r: _csat_rule(r["sentimiento"], r["estado_final"]), axis=1)
+    mask_trio = (df["sentimiento"].astype(str).str.lower().eq("neutro")) & (
+        df["urgencia"].astype(str).str.lower().eq("media")
+    ) & (df["csat"].astype(str).eq("3"))
+    df.loc[mask_trio, "sentimiento"] = df.loc[mask_trio, "texto_base"].map(
+        _sent_rule
+    )
+    df.loc[mask_trio, "urgencia"] = df.loc[mask_trio, "texto_base"].map(_urg_rule)
+    df.loc[mask_trio, "csat"] = df.loc[mask_trio].apply(
+        lambda r: _csat_rule(r["sentimiento"], r["estado_final"]),
+        axis=1,
+    )
     triovago_rate = round(100 * mask_trio.mean(), 1)
 
     # Heurística de silencio => resuelto
@@ -1359,18 +2291,30 @@ def run(csv_path: str,
         areas = top_values(grp["area"])
         motivos = top_values(grp["motivo_norm"])
         submotivos = top_values(grp["submotivo_norm"])
-        ejemplos = grp.loc[grp["link_a_intercom"].astype(str).str.len() > 0, "link_a_intercom"].head(3).astype(str).tolist()
-        rows.append({
-            "issue": issue,
-            "casos": int(len(grp)),
-            "canales_top": canales,
-            "areas_top": areas,
-            "motivos_top": motivos,
-            "submotivos_top": submotivos,
-            "ejemplos_intercom": " | ".join(ejemplos)
-        })
+        ejemplos = (
+            grp.loc[
+                grp["link_a_intercom"].astype(str).str.len() > 0,
+                "link_a_intercom",
+            ]
+            .head(3)
+            .astype(str)
+            .tolist()
+        )
+        rows.append(
+            {
+                "issue": issue,
+                "casos": int(len(grp)),
+                "canales_top": canales,
+                "areas_top": areas,
+                "motivos_top": motivos,
+                "submotivos_top": submotivos,
+                "ejemplos_intercom": " | ".join(ejemplos),
+            }
+        )
     resumen_df = pd.DataFrame(rows).sort_values("casos", ascending=False)
-    resumen_df = compare_with_prev(resumen_df, hist_dir=os.path.join(out_dir, "hist"))
+    resumen_df = compare_with_prev(
+        resumen_df, hist_dir=os.path.join(out_dir, "hist")
+    )
 
     # ---------- Fingerprint (para nombres y cache-busting) ----------
     fp = _dataset_fingerprint(df)
@@ -1378,12 +2322,39 @@ def run(csv_path: str,
     # Exports CSV
     issues_csv = os.path.join(out_dir, "issues_resumen.csv")
     casos_csv = os.path.join(out_dir, "casos_con_issue.csv")
-    df_export_cols = ["fecha","canal","rol","area","tema_norm","motivo_norm","submotivo_norm",
-                      "categoria","urgencia","sentimiento","resumen_ia","insight_ia","resumen_qc","insight_qc",
-                      "palabras_clave","issue_group","estado_final","risk","sla_now","taxonomy_flag",
-                      "link_a_intercom","id_intercom",
-                      "created_at","first_admin_reply_at","first_contact_reply_at","closed_at",
-                      "first_response_seconds","ttr_seconds","status","csat","csat_num"]
+    df_export_cols = [
+        "fecha",
+        "canal",
+        "rol",
+        "area",
+        "tema_norm",
+        "motivo_norm",
+        "submotivo_norm",
+        "categoria",
+        "urgencia",
+        "sentimiento",
+        "resumen_ia",
+        "insight_ia",
+        "resumen_qc",
+        "insight_qc",
+        "palabras_clave",
+        "issue_group",
+        "estado_final",
+        "risk",
+        "sla_now",
+        "taxonomy_flag",
+        "link_a_intercom",
+        "id_intercom",
+        "created_at",
+        "first_admin_reply_at",
+        "first_contact_reply_at",
+        "closed_at",
+        "first_response_seconds",
+        "ttr_seconds",
+        "status",
+        "csat",
+        "csat_num",
+    ]
     existing = [c for c in df_export_cols if c in df.columns]
     df[existing].to_csv(casos_csv, index=False, encoding="utf-8")
     resumen_df.to_csv(issues_csv, index=False, encoding="utf-8")
@@ -1391,8 +2362,15 @@ def run(csv_path: str,
     total = len(df)
 
     # Gráficos (Top Issues desde resumen_df + nombre con fingerprint)
-    p_top,   top_counts = chart_top_issues(resumen_df, out_dir, filename=f"top_issues_{fp}.png")
-    print("DEBUG Top Issues usados →", top_counts.to_dict(), "| PNG:", os.path.basename(p_top))
+    p_top, top_counts = chart_top_issues(
+        resumen_df, out_dir, filename=f"top_issues_{fp}.png"
+    )
+    print(
+        "DEBUG Top Issues usados →",
+        top_counts.to_dict(),
+        "| PNG:",
+        os.path.basename(p_top),
+    )
 
     p_urg_pie, urg_counts = chart_urgencia_pie(df, out_dir)
     p_sent_pie, sent_counts = chart_sentimiento_pie(df, out_dir)
@@ -1400,6 +2378,14 @@ def run(csv_path: str,
     p_canal_issue, canal_issue_ct = chart_canal_por_issue(df, out_dir)
     p_urg_top, urg_top_ct = chart_urgencias_en_top_issues(df, out_dir)
     p_ttr_urg, ttr_urg_stats = chart_ttr_box_by_urgencia(df, out_dir)
+
+    # ===== NUEVO: Issues por área (Top) + Accionables por área =====
+    areas_focus = [
+        a.strip() for a in (areas_focus_str or "CX,Customer Success").split(",") if a.strip()
+    ]
+    area_summaries = summarize_issues_by_area(
+        df, areas_focus=areas_focus, top_n_per_area=5
+    )
 
     # Assets públicos
     if publish_github and github_repo_path:
@@ -1457,13 +2443,19 @@ def run(csv_path: str,
         cached = cache[fp]
         insights = cached.get("insights", {})
         acciones_ai = cached.get("acciones_ai", {})
-        print(f"♻️ Reutilizando insights desde cache. insights={len(insights)} | acciones={len(acciones_ai)}")
+        print(
+            f"♻️ Reutilizando insights desde cache. "
+            f"insights={len(insights)} | acciones={len(acciones_ai)}"
+        )
     elif budget > 0 and (openai_api_key or os.getenv("OPENAI_API_KEY")):
+
         def try_insight(name, obj):
             nonlocal insights
             if not ai.take():
                 return
-            txt = ai_insight_for_chart(name, obj, api_key=openai_api_key, model=openai_model)
+            txt = ai_insight_for_chart(
+                name, obj, api_key=openai_api_key, model=openai_model
+            )
             if txt == "__RATE_LIMIT__":  # corta toda la sesión si pega rate limit
                 ai.rate_limited = True
                 return
@@ -1487,16 +2479,18 @@ def run(csv_path: str,
         for _, row in resumen_df.head(max_actions).iterrows():
             if ai.rate_limited or not ai.take():
                 break
-            issue = str(row.get("issue",""))
+            issue = str(row.get("issue", ""))
             ctx = {
-                "canales_top": str(row.get("canales_top","")),
-                "areas_top": str(row.get("areas_top","")),
-                "motivos_top": str(row.get("motivos_top","")),
-                "submotivos_top": str(row.get("submotivos_top","")),
-                "total_casos_issue": int(row.get("casos",0) or 0),
-                "total_casos_semana": total
+                "canales_top": str(row.get("canales_top", "")),
+                "areas_top": str(row.get("areas_top", "")),
+                "motivos_top": str(row.get("motivos_top", "")),
+                "submotivos_top": str(row.get("submotivos_top", "")),
+                "total_casos_issue": int(row.get("casos", 0) or 0),
+                "total_casos_semana": total,
             }
-            add = ai_actions_for_issue(issue, ctx, api_key=openai_api_key, model=openai_model)
+            add = ai_actions_for_issue(
+                issue, ctx, api_key=openai_api_key, model=openai_model
+            )
             if add.get("__rate_limited__"):
                 ai.rate_limited = True
                 break
@@ -1508,10 +2502,16 @@ def run(csv_path: str,
             _save_ai_cache(cache_path, cache)
 
     # Fallbacks determinísticos (garantiza foquito en TTR por urgencia)
-    insights = _fallback_insights(insights, top_counts, urg_counts, sent_counts, ttr_urg_stats)
+    insights = _fallback_insights(
+        insights, top_counts, urg_counts, sent_counts, ttr_urg_stats
+    )
 
     used = budget - ai.budget
-    print(f"🤖 IA (OpenAI) → modo={mode} | usadas={used}/{budget} | rate_limited={ai.rate_limited} | insights={len(insights)} | acciones={len(acciones_ai)}")
+    print(
+        f"🤖 IA (OpenAI) → modo={mode} | usadas={used}/{budget} | "
+        f"rate_limited={ai.rate_limited} | insights={len(insights)} | "
+        f"acciones={len(acciones_ai)}"
+    )
     # Métricas internas (no públicas)
     print(json.dumps({"triovago_rate_%": triovago_rate}, ensure_ascii=False))
 
@@ -1534,43 +2534,114 @@ def run(csv_path: str,
             insights=insights,
             acciones_ai=acciones_ai if acciones_ai else None,
             kpis=kpis,
-            top_counts_series=top_counts
+            top_counts_series=top_counts,
+            area_summaries=area_summaries,  # <— NUEVO
         )
         print(f"✅ Publicado en Notion: {page.get('url','(sin url)')}")
     else:
         print("ℹ️ Notion no configurado. Se generaron archivos locales.")
-        print(json.dumps({
-            "issues_csv": issues_csv,
-            "casos_csv": casos_csv,
-            "charts": {
-                "top_issues": p_top,
-                "urgencia_pie": p_urg_pie,
-                "sentimiento_pie": p_sent_pie,
-                "urgencia_por_issue": p_urg_issue,
-                "canal_por_issue": p_canal_issue,
-                "urgencia_top_issues": p_urg_top,
-                "ttr_por_urgencia_box": p_ttr_urg
-            },
-            "insights": insights
-        }, indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "issues_csv": issues_csv,
+                    "casos_csv": casos_csv,
+                    "charts": {
+                        "top_issues": p_top,
+                        "urgencia_pie": p_urg_pie,
+                        "sentimiento_pie": p_sent_pie,
+                        "urgencia_por_issue": p_urg_issue,
+                        "canal_por_issue": p_canal_issue,
+                        "urgencia_top_issues": p_urg_top,
+                        "ttr_por_urgencia_box": p_ttr_urg,
+                    },
+                    "insights": insights,
+                    "areas_focus": areas_focus,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+
 
 # ===================== CLI =====================
 
+
 def main():
-    ap = argparse.ArgumentParser(description="Venti – Insight IA (Notion narrativo + OpenAI API)")
+    ap = argparse.ArgumentParser(
+        description="Venti – Insight IA (Notion narrativo + OpenAI API)"
+    )
     ap.add_argument("--csv", required=True, help="Ruta al CSV de conversaciones")
-    ap.add_argument("--out", default="./salida", help="Directorio de salida")
-    ap.add_argument("--notion_token", default=os.getenv("NOTION_TOKEN"), help="Token de Notion")
-    ap.add_argument("--notion_parent", default=os.getenv("NOTION_PARENT_PAGE_ID"), help="ID de página padre en Notion")
-    ap.add_argument("--publish_github", action="store_true", help="Publicar PNGs al repo y usar URL pública")
-    ap.add_argument("--github_repo_path", default=None, help="Ruta local al repo clonado")
-    ap.add_argument("--github_branch", default="main", help="Branch destino")
-    ap.add_argument("--assets_base_url", default=None, help="URL base pública ya hosteada (si no publicas a GitHub)")
-    ap.add_argument("--openai_api_key", default=os.getenv("OPENAI_API_KEY"), help="API key de OpenAI")
-    ap.add_argument("--openai_model", default="gpt-4o-mini", help="Modelo de OpenAI (p.ej., gpt-4o-mini, o4-mini)")
-    ap.add_argument("--sla_first_reply_min", type=int, default=15, help="SLA (min) para % 1ra respuesta")
-    ap.add_argument("--ai_mode", choices=["full","lite","off"], default="full", help="Nivel de generación con IA")
-    ap.add_argument("--ai_budget", type=int, default=100, help="Máximo de requests a OpenAI por corrida")
+    ap.add_argument(
+        "--out", default="./salida", help="Directorio de salida"
+    )
+    ap.add_argument(
+        "--notion_token",
+        default=os.getenv("NOTION_TOKEN"),
+        help="Token de Notion",
+    )
+    ap.add_argument(
+        "--notion_parent",
+        default=os.getenv("NOTION_PARENT_PAGE_ID"),
+        help="ID de página padre en Notion",
+    )
+    ap.add_argument(
+        "--publish_github",
+        action="store_true",
+        help="Publicar PNGs al repo y usar URL pública",
+    )
+    ap.add_argument(
+        "--github_repo_path",
+        default=None,
+        help="Ruta local al repo clonado",
+    )
+    ap.add_argument(
+        "--github_branch",
+        default="main",
+        help="Branch destino",
+    )
+    ap.add_argument(
+        "--assets_base_url",
+        default=None,
+        help="URL base pública ya hosteada (si no publicas a GitHub)",
+    )
+    ap.add_argument(
+        "--openai_api_key",
+        default=os.getenv("OPENAI_API_KEY"),
+        help="API key de OpenAI",
+    )
+    ap.add_argument(
+        "--openai_model",
+        default="gpt-4o-mini",
+        help="Modelo de OpenAI (p.ej., gpt-4o-mini, o4-mini)",
+    )
+    ap.add_argument(
+        "--sla_first_reply_min",
+        type=int,
+        default=15,
+        help="SLA (min) para % 1ra respuesta",
+    )
+    ap.add_argument(
+        "--ai_mode",
+        choices=["full", "lite", "off"],
+        default="full",
+        help="Nivel de generación con IA",
+    )
+    ap.add_argument(
+        "--ai_budget",
+        type=int,
+        default=100,
+        help="Máximo de requests a OpenAI por corrida",
+    )
+    # NUEVO
+    ap.add_argument(
+        "--areas_focus",
+        default="CX,Customer Success",
+        help=(
+            "Lista separada por coma de áreas a incluir en 'Issues por área' y "
+            "'Accionables por área' (por ej. 'CX,Customer Success,Producto')"
+        ),
+    )
+
     args = ap.parse_args()
 
     print("▶ Script iniciado")
@@ -1578,6 +2649,7 @@ def main():
     print("OUT:", args.out)
     print("NOTION_TOKEN:", "OK" if args.notion_token else "FALTA")
     print("PARENT:", args.notion_parent)
+    print("AREAS_FOCUS:", args.areas_focus)
 
     run(
         csv_path=args.csv,
@@ -1592,8 +2664,10 @@ def main():
         openai_model=args.openai_model,
         sla_first_reply_min=args.sla_first_reply_min,
         ai_mode=args.ai_mode,
-        ai_budget=args.ai_budget
+        ai_budget=args.ai_budget,
+        areas_focus_str=args.areas_focus,  # <— NUEVO
     )
+
 
 if __name__ == "__main__":
     main()
